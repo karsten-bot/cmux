@@ -14,6 +14,7 @@
 #include "include/capi/cef_browser_capi.h"
 #include "include/capi/cef_browser_process_handler_capi.h"
 #include "include/capi/cef_display_handler_capi.h"
+#include "include/capi/cef_frame_capi.h"
 #include "include/capi/cef_life_span_handler_capi.h"
 #include "include/capi/cef_load_handler_capi.h"
 #include "include/cef_api_hash.h"
@@ -21,6 +22,8 @@
 #include "libcef_dll/wrapper/libcef_dll_dylib.cc"
 
 static std::string g_last_error;
+static NSString *const CmuxChromiumReactGrabMessageNotification = @"CmuxChromiumReactGrabMessageNotification";
+static NSString *const CmuxChromiumReactGrabMessagePrefix = @"__CMUX_REACT_GRAB__";
 static BOOL g_initialized = NO;
 static NSTimer *g_message_loop_timer = nil;
 static NSTimer *g_scheduled_message_loop_timer = nil;
@@ -222,6 +225,34 @@ static void CEF_CALLBACK OnBeforeClose(cef_life_span_handler_t *self, cef_browse
     browser->base.release(&browser->base);
 }
 
+static int CEF_CALLBACK OnConsoleMessage(
+    cef_display_handler_t *self,
+    cef_browser_t *browser,
+    cef_log_severity_t level,
+    const cef_string_t *message,
+    const cef_string_t *source,
+    int line
+) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, display_handler));
+    if (!message || !message->str) return 0;
+    NSString *text = [[NSString alloc] initWithCharacters:(const unichar *)message->str length:message->length];
+    if (![text hasPrefix:CmuxChromiumReactGrabMessagePrefix]) {
+        return 0;
+    }
+
+    NSString *payload = [text substringFromIndex:CmuxChromiumReactGrabMessagePrefix.length];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!client->browser_handle) return;
+        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumReactGrabMessageNotification
+                                                          object:nil
+                                                        userInfo:@{
+                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"payload": payload
+                                                        }];
+    });
+    return 1;
+}
+
 static void CEF_CALLBACK OnAfterCreated(cef_life_span_handler_t *self, cef_browser_t *browser) {
     browser->base.release(&browser->base);
 }
@@ -237,6 +268,7 @@ static cmux_chromium_client_t *CreateClient(void) {
     client->client.get_load_handler = GetLoadHandler;
     client->life_span_handler.on_after_created = OnAfterCreated;
     client->life_span_handler.on_before_close = OnBeforeClose;
+    client->display_handler.on_console_message = OnConsoleMessage;
     return client;
 }
 
@@ -412,6 +444,21 @@ void cmux_chromium_load_url(void *browserHandle, const char *url) {
         cef_string_t cef_url = {};
         cef_string_from_utf8(url ?: "about:blank", strlen(url ?: "about:blank"), &cef_url);
         frame->load_url(frame, &cef_url);
+        cef_string_clear(&cef_url);
+        frame->base.release(&frame->base);
+    });
+}
+
+void cmux_chromium_execute_javascript(void *browserHandle, const char *script) {
+    WithBrowser(browserHandle, ^(cef_browser_t *browser) {
+        cef_frame_t *frame = browser->get_main_frame(browser);
+        if (!frame) return;
+        cef_string_t cef_code = {};
+        cef_string_t cef_url = {};
+        cef_string_from_utf8(script ?: "", strlen(script ?: ""), &cef_code);
+        cef_string_from_utf8("cmux://react-grab", strlen("cmux://react-grab"), &cef_url);
+        frame->execute_java_script(frame, &cef_code, &cef_url, 1);
+        cef_string_clear(&cef_code);
         cef_string_clear(&cef_url);
         frame->base.release(&frame->base);
     });

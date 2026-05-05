@@ -68,6 +68,8 @@ final class ChromiumBrowserHostView: NSView {
     private var devToolsOpenTask: Task<Void, Never>?
     private var devToolsDividerEventMonitor: Any?
     private var devToolsDividerTrackingArea: NSTrackingArea?
+    private var pendingJavaScript: [String] = []
+    private var isObservingReactGrabMessages = false
     private let pageContainerView = NSView(frame: .zero)
     private let devToolsContainerView = NSView(frame: .zero)
     private lazy var devToolsDividerView = DevToolsDividerView(hostView: self)
@@ -79,6 +81,8 @@ final class ChromiumBrowserHostView: NSView {
     private let devToolsMinimumPageWidth: CGFloat = 160
     private static let devToolsDividerCursor = NSCursor.resizeLeftRight
     private static let devToolsWidthDefaultsKey = "chromiumDevToolsAttachedWidth"
+    private static let reactGrabMessageNotification = Notification.Name("CmuxChromiumReactGrabMessageNotification")
+    var onReactGrabMessage: (([String: Any]) -> Void)?
 
     init(initialURL: URL?) {
         pendingURL = initialURL
@@ -114,6 +118,7 @@ final class ChromiumBrowserHostView: NSView {
         if let devToolsDividerTrackingArea {
             removeTrackingArea(devToolsDividerTrackingArea)
         }
+        NotificationCenter.default.removeObserver(self)
         if let devToolsBrowserHandle {
             cmux_chromium_close_browser(devToolsBrowserHandle)
         }
@@ -218,6 +223,15 @@ final class ChromiumBrowserHostView: NSView {
     func stopLoading() {
         guard let browserHandle else { return }
         cmux_chromium_stop_loading(browserHandle)
+    }
+
+    func executeJavaScript(_ script: String) {
+        guard let browserHandle else {
+            pendingJavaScript.append(script)
+            ensureBrowserCreated()
+            return
+        }
+        cmux_chromium_execute_javascript(browserHandle, script)
     }
 
     func showDeveloperTools() -> Bool {
@@ -455,7 +469,31 @@ final class ChromiumBrowserHostView: NSView {
             let message = String(cString: cmux_chromium_last_error())
             cmuxDebugLog("browser.chromium.create.failed \(message)")
             #endif
+        } else if let browserHandle {
+            if !isObservingReactGrabMessages {
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleReactGrabMessageNotification(_:)),
+                    name: Self.reactGrabMessageNotification,
+                    object: nil
+                )
+                isObservingReactGrabMessages = true
+            }
+            pendingJavaScript.forEach { cmux_chromium_execute_javascript(browserHandle, $0) }
+            pendingJavaScript.removeAll()
         }
+    }
+
+    @objc private func handleReactGrabMessageNotification(_ notification: Notification) {
+        guard let browserHandle,
+              let notifiedBrowserHandle = notification.userInfo?["browserHandle"] as? NSValue,
+              notifiedBrowserHandle.pointerValue == browserHandle,
+              let payload = notification.userInfo?["payload"] as? String,
+              let data = payload.data(using: .utf8),
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        onReactGrabMessage?(body)
     }
 
     private struct DevToolsTarget: Decodable {

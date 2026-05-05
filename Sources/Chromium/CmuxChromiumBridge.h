@@ -13,6 +13,7 @@ void * _Nullable cmux_chromium_create_browser(NSView *parentView, const char *ur
 void cmux_chromium_close_browser(void *browserHandle);
 void cmux_chromium_resize_browser(void *browserHandle);
 void cmux_chromium_load_url(void *browserHandle, const char *url);
+void cmux_chromium_execute_javascript(void *browserHandle, const char *script);
 void cmux_chromium_go_back(void *browserHandle);
 void cmux_chromium_go_forward(void *browserHandle);
 void cmux_chromium_reload(void *browserHandle);

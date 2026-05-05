@@ -331,6 +331,13 @@ extension BrowserPanel {
         cmuxDebugLog("reactGrab.inject.fetched len=\(scriptSource.count)")
         #endif
 
+        if injectChromiumReactGrab(scriptSource: scriptSource, sessionTokenLiteral: reactGrabSessionTokenLiteral()) {
+            #if DEBUG
+            cmuxDebugLog("reactGrab.inject.evalJS.done chromium")
+            #endif
+            return
+        }
+
         let handlerName = reactGrabMessageHandlerName
         let sessionTokenLiteral = reactGrabSessionTokenLiteral()
         let combined = """
@@ -416,6 +423,12 @@ extension BrowserPanel {
         cmuxDebugLog("reactGrab.toggle.start")
         #endif
         let script = "window.__REACT_GRAB__?.toggle()"
+        if executeChromiumJavaScript(script) {
+            #if DEBUG
+            cmuxDebugLog("reactGrab.toggle.end chromium")
+            #endif
+            return
+        }
         webView.evaluateJavaScript(script, completionHandler: nil)
         #if DEBUG
         cmuxDebugLog("reactGrab.toggle.end")
@@ -442,6 +455,9 @@ extension BrowserPanel {
 
     @discardableResult
     func refreshReactGrabBridgeSessionToken() async -> Bool {
+        if executeChromiumJavaScript(reactGrabBridgeSessionRefreshScript()) {
+            return true
+        }
         do {
             let result = try await evaluateJavaScript(reactGrabBridgeSessionRefreshScript())
             return (result as? Bool) ?? false
