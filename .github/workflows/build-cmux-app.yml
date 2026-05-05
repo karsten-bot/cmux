@@ -1,0 +1,226 @@
+name: Build cmux app
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RELEASE_TAG: chromium-latest
+  RELEASE_TITLE: cmux Chromium latest
+  ARTIFACT_NAME: cmux-chromium-macos-arm64.zip
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
+            XCODE_DIR="/Applications/Xcode.app/Contents/Developer"
+          else
+            XCODE_APP="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort | tail -n 1 || true)"
+            if [ -z "$XCODE_APP" ]; then
+              echo "No Xcode.app found under /Applications" >&2
+              exit 1
+            fi
+            XCODE_DIR="$XCODE_APP/Contents/Developer"
+          fi
+          echo "DEVELOPER_DIR=$XCODE_DIR" >> "$GITHUB_ENV"
+          export DEVELOPER_DIR="$XCODE_DIR"
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-path
+
+      - name: Cache GhosttyKit.xcframework
+        id: cache-ghosttykit
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: GhosttyKit.xcframework
+          key: ghosttykit-${{ hashFiles('scripts/download-prebuilt-ghosttykit.sh') }}
+
+      - name: Download pre-built GhosttyKit.xcframework
+        if: steps.cache-ghosttykit.outputs.cache-hit != 'true'
+        run: ./scripts/download-prebuilt-ghosttykit.sh
+
+      - name: Cache Chromium Embedded Framework
+        id: cache-cef
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: .cef-cache
+          key: cef-${{ hashFiles('scripts/download-cef-runtime.sh') }}
+
+      - name: Download Chromium Embedded Framework
+        if: steps.cache-cef.outputs.cache-hit != 'true'
+        run: ./scripts/download-cef-runtime.sh
+
+      - name: Install zig
+        run: |
+          set -euo pipefail
+          ZIG_REQUIRED="0.15.2"
+          if command -v zig >/dev/null 2>&1 && zig version 2>/dev/null | grep -q "^${ZIG_REQUIRED}"; then
+            zig version
+            exit 0
+          fi
+
+          case "$(uname -m)" in
+            arm64) ZIG_ARCH="aarch64" ;;
+            x86_64) ZIG_ARCH="x86_64" ;;
+            *)
+              echo "Unsupported macOS architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          curl -fSL "https://ziglang.org/download/${ZIG_REQUIRED}/zig-${ZIG_ARCH}-macos-${ZIG_REQUIRED}.tar.xz" -o /tmp/zig.tar.xz
+          tar xf /tmp/zig.tar.xz -C /tmp
+          sudo mkdir -p /usr/local/bin /usr/local/lib
+          sudo cp -f "/tmp/zig-${ZIG_ARCH}-macos-${ZIG_REQUIRED}/zig" /usr/local/bin/zig
+          sudo cp -rf "/tmp/zig-${ZIG_ARCH}-macos-${ZIG_REQUIRED}/lib" /usr/local/lib/zig
+          zig version
+
+      - name: Cache Zig packages
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/zig
+          key: zig-packages-${{ hashFiles('ghostty/build.zig.zon', 'ghostty/build.zig.zon.json', 'cmuxd/build.zig.zon') }}
+          restore-keys: zig-packages-
+
+      - name: Cache Swift packages
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: .spm-cache
+          key: spm-${{ hashFiles('GhosttyTabs.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: spm-
+
+      - name: Build app
+        run: |
+          set -euo pipefail
+          xcodebuild -project GhosttyTabs.xcodeproj -scheme cmux -configuration Release \
+            -derivedDataPath build-cmux-app \
+            -destination 'generic/platform=macOS' \
+            -clonedSourcePackagesDirPath .spm-cache \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Verify app bundle
+        run: |
+          set -euo pipefail
+          APP="build-cmux-app/Build/Products/Release/cmux.app"
+          APP_BINARY="$APP/Contents/MacOS/cmux"
+          CLI_BINARY="$APP/Contents/Resources/bin/cmux"
+          GHOSTTY_HELPER="$APP/Contents/Resources/bin/ghostty"
+          CEF_BINARY="$APP/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework"
+          CHROMIUM_HELPER="$APP/Contents/Frameworks/cmux Chromium Helper.app/Contents/MacOS/cmux Chromium Helper"
+
+          test -d "$APP"
+          test -x "$APP_BINARY"
+          test -x "$CLI_BINARY"
+          test -x "$GHOSTTY_HELPER"
+          test -f "$CEF_BINARY"
+          test -x "$CHROMIUM_HELPER"
+
+          for binary in "$APP_BINARY" "$CLI_BINARY" "$GHOSTTY_HELPER" "$CEF_BINARY" "$CHROMIUM_HELPER"; do
+            archs="$(lipo -archs "$binary")"
+            echo "$binary: $archs"
+            [[ "$archs" == *arm64* ]]
+          done
+
+      - name: Stamp fork app display name
+        run: |
+          set -euo pipefail
+          APP_PLIST="build-cmux-app/Build/Products/Release/cmux.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 'cmux Chromium'" "$APP_PLIST"
+
+      - name: Stamp dev version
+        if: github.event_name != 'pull_request' && github.ref_name == 'main'
+        run: |
+          set -euo pipefail
+          APP_PLIST="build-cmux-app/Build/Products/Release/cmux.app/Contents/Info.plist"
+          BASE_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PLIST")
+          SHORT_SHA="$(git rev-parse --short=9 HEAD)"
+          DEV_VERSION="${BASE_VERSION}-chromium.${GITHUB_RUN_NUMBER}"
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${DEV_VERSION}" "$APP_PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER}" "$APP_PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CMUXCommit ${SHORT_SHA}" "$APP_PLIST" >/dev/null 2>&1 || \
+            /usr/libexec/PlistBuddy -c "Add :CMUXCommit string ${SHORT_SHA}" "$APP_PLIST"
+
+          echo "DEV_VERSION=${DEV_VERSION}" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+
+      - name: Disable automatic Sparkle updates for fork build
+        if: github.event_name != 'pull_request' && github.ref_name == 'main'
+        run: |
+          set -euo pipefail
+          APP_PLIST="build-cmux-app/Build/Products/Release/cmux.app/Contents/Info.plist"
+
+          /usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$APP_PLIST"
+          /usr/libexec/PlistBuddy -c "Set :SUAutomaticallyUpdate false" "$APP_PLIST"
+
+      - name: Package app artifact
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          ditto -c -k --keepParent "build-cmux-app/Build/Products/Release/cmux.app" "artifacts/${ARTIFACT_NAME}"
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cmux-macos-arm64
+          path: artifacts/${{ env.ARTIFACT_NAME }}
+          if-no-files-found: error
+
+      - name: Publish latest Chromium release
+        if: github.event_name != 'pull_request' && github.ref_name == 'main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ASSET_PATH="artifacts/${ARTIFACT_NAME}"
+          RELEASE_NOTES="$(mktemp)"
+          cat > "$RELEASE_NOTES" <<EOF
+          Latest unsigned cmux Chromium build from this fork.
+
+          - Version: ${DEV_VERSION}
+          - Commit: ${SHORT_SHA}
+          - Branch: ${GITHUB_REF_NAME}
+          - Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          This build is arm64-only and is not Apple-notarized.
+          EOF
+
+          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/${RELEASE_TAG}"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$RELEASE_NOTES" \
+              --latest
+            gh release delete-asset "$RELEASE_TAG" "$ARTIFACT_NAME" --yes >/dev/null 2>&1 || true
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$RELEASE_NOTES" \
+              --latest
+          fi
+
+          gh release upload "$RELEASE_TAG" "$ASSET_PATH" --clobber
