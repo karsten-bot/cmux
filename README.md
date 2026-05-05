@@ -1,3 +1,21 @@
+## cmux Chromium fork
+
+An experimental cmux fork that adds Chromium as browser engine.
+
+WebKit does not work well for web dev for me (especially Tailwind), so this adds Chromium as browser engine.
+
+Download the latest build from [GitHub Releases](https://github.com/TimoBechtel/cmux/releases/tag/chromium-latest), unzip it, and move `cmux.app` to `/Applications`.
+
+These builds are unsigned for now. If macOS blocks the app, run:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/cmux.app
+```
+
+The upstream README starts below.
+
+---
+
 <h1 align="center">cmux</h1>
 <p align="center">A Ghostty-based macOS terminal with vertical tabs and notifications for AI coding agents</p>
 

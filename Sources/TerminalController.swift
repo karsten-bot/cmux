@@ -9236,6 +9236,10 @@ class TerminalController {
         let url = urlStr.flatMap { URL(string: $0) }
         let respectExternalOpenRules = v2Bool(params, "respect_external_open_rules") ?? false
 
+        if !BrowserEngineAvailability.canCreateBrowserSurface() {
+            return BrowserEngineAvailability.browserV2UnavailableResult(method: "browser.open_split")
+        }
+
         if BrowserAvailabilitySettings.isDisabled() {
             return v2BrowserDisabledExternalOpenResult(rawURL: urlStr, url: url, tabManager: tabManager)
         }

@@ -696,6 +696,12 @@
           "default": true,
           "description": "Show omnibar search suggestions."
         },
+        "engine": {
+          "type": "string",
+          "enum": ["webkit", "chromium"],
+          "default": "webkit",
+          "description": "Embedded browser engine. Chromium requires a bundled CEF runtime."
+        },
         "theme": {
           "type": "string",
           "enum": ["system", "light", "dark"],

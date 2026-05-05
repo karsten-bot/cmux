@@ -107,6 +107,7 @@ extension CmuxSettingsFileStore {
         "automation.portRange",
         "browser.defaultSearchEngine",
         "browser.showSearchSuggestions",
+        "browser.engine",
         "browser.theme",
         "browser.openTerminalLinksInCmuxBrowser",
         "browser.interceptTerminalOpenCommandInCmuxBrowser",

@@ -1042,6 +1042,36 @@ final class CmuxWebViewKeyEquivalentTests: XCTestCase {
     }
 }
 
+final class BrowserEngineSettingsTests: XCTestCase {
+    func testDefaultsToWebKit() {
+        let suiteName = "BrowserEngineSettingsTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(BrowserEngineSettings.currentEngine(defaults: defaults), .webkit)
+    }
+
+    func testReadsChromiumEngine() {
+        let suiteName = "BrowserEngineSettingsTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set(BrowserEngine.chromium.rawValue, forKey: BrowserEngineSettings.engineKey)
+
+        XCTAssertEqual(BrowserEngineSettings.currentEngine(defaults: defaults), .chromium)
+    }
+
+    func testInvalidEngineFallsBackToWebKit() {
+        let suiteName = "BrowserEngineSettingsTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set("firefox", forKey: BrowserEngineSettings.engineKey)
+
+        XCTAssertEqual(BrowserEngineSettings.currentEngine(defaults: defaults), .webkit)
+    }
+}
+
 
 @MainActor
 final class CmuxWebViewContextMenuTests: XCTestCase {

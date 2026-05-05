@@ -52,3 +52,6 @@ web/public/pagefind/
 # Local scratch (screenshots, etc.)
 tmp/
 tmp-*/
+
+# Chromium Embedded Framework local runtime cache
+.cef-cache/

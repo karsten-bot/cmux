@@ -5003,6 +5003,7 @@ struct SettingsView: View {
     @AppStorage(AutomationSettings.portRangeKey) private var cmuxPortRange = AutomationSettings.defaultPortRange
     @AppStorage(BrowserSearchSettings.searchEngineKey) private var browserSearchEngine = BrowserSearchSettings.defaultSearchEngine.rawValue
     @AppStorage(BrowserSearchSettings.searchSuggestionsEnabledKey) private var browserSearchSuggestionsEnabled = BrowserSearchSettings.defaultSearchSuggestionsEnabled
+    @AppStorage(BrowserEngineSettings.engineKey) private var browserEngine = BrowserEngineSettings.defaultEngine.rawValue
     @AppStorage(BrowserThemeSettings.modeKey) private var browserThemeMode = BrowserThemeSettings.defaultMode.rawValue
     @AppStorage(BrowserAvailabilitySettings.disabledKey) private var browserDisabled = BrowserAvailabilitySettings.defaultDisabled
     @AppStorage(BrowserImportHintSettings.variantKey) private var browserImportHintVariantRaw = BrowserImportHintSettings.defaultVariant.rawValue
@@ -5252,6 +5253,19 @@ struct SettingsView: View {
 
     private var selectedBrowserThemeMode: BrowserThemeMode {
         BrowserThemeSettings.mode(for: browserThemeMode)
+    }
+
+    private var selectedBrowserEngine: BrowserEngine {
+        BrowserEngineSettings.engine(for: browserEngine)
+    }
+
+    private var browserEngineSelection: Binding<String> {
+        Binding(
+            get: { browserEngine },
+            set: { newValue in
+                browserEngine = BrowserEngineSettings.engine(for: newValue).rawValue
+            }
+        )
     }
 
     private var browserThemeModeSelection: Binding<String> {
@@ -6619,6 +6633,22 @@ struct SettingsView: View {
                         SettingsCardDivider()
 
                         SettingsPickerRow(
+                            configurationReview: .json("browser.engine"),
+                            String(localized: "settings.browser.engine", defaultValue: "Browser Engine"),
+                            subtitle: selectedBrowserEngine == .webkit
+                                ? String(localized: "settings.browser.engine.subtitleWebKit", defaultValue: "WebKit is the built-in engine and supports the current cmux browser features.")
+                                : BrowserEngineSettings.chromiumUnavailableMessage(),
+                            controlWidth: pickerColumnWidth,
+                            selection: browserEngineSelection
+                        ) {
+                            ForEach(BrowserEngine.allCases) { engine in
+                                Text(engine.displayName).tag(engine.rawValue)
+                            }
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsPickerRow(
                             configurationReview: .json("browser.theme"),
                             String(localized: "settings.browser.theme", defaultValue: "Browser Theme"),
                             subtitle: selectedBrowserThemeMode == .system
@@ -7307,6 +7337,7 @@ struct SettingsView: View {
         openMarkdownInCmuxViewer = CmdClickMarkdownRouteSettings.defaultValue
         browserSearchEngine = BrowserSearchSettings.defaultSearchEngine.rawValue
         browserSearchSuggestionsEnabled = BrowserSearchSettings.defaultSearchSuggestionsEnabled
+        browserEngine = BrowserEngineSettings.defaultEngine.rawValue
         browserThemeMode = BrowserThemeSettings.defaultMode.rawValue
         BrowserAvailabilitySettings.setDisabled(BrowserAvailabilitySettings.defaultDisabled)
         browserDisabled = BrowserAvailabilitySettings.defaultDisabled

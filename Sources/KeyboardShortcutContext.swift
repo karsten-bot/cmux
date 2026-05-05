@@ -119,6 +119,10 @@ extension AppDelegate {
             return panel
         }
 
+        if let panel = shortcutChromiumBrowserPanel(for: responder) {
+            return panel
+        }
+
         if let webView = shortcutOwningWebView(for: responder) {
             return shortcutBrowserPanel(webView: webView)
         }
