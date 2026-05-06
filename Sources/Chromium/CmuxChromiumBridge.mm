@@ -48,6 +48,11 @@ static NSString *CmuxChromiumResourcesPath(void) {
     return [frameworksURL URLByAppendingPathComponent:@"Chromium Embedded Framework.framework/Resources"].path;
 }
 
+static NSString *CmuxChromiumProfileName(void) {
+    NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
+    return bundleIdentifier.length > 0 ? bundleIdentifier : @"default";
+}
+
 static NSString *CmuxChromiumHelperPath(void) {
     NSURL *frameworksURL = NSBundle.mainBundle.privateFrameworksURL;
     if (!frameworksURL) return nil;
@@ -372,7 +377,9 @@ BOOL cmux_chromium_initialize(void) {
     SetCefString(&settings.resources_dir_path, CmuxChromiumResourcesPath());
 
     NSURL *appSupport = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
-    NSURL *cacheURL = [[appSupport URLByAppendingPathComponent:@"cmux" isDirectory:YES] URLByAppendingPathComponent:@"Chromium" isDirectory:YES];
+    NSURL *cacheURL = [[[appSupport URLByAppendingPathComponent:@"cmux" isDirectory:YES]
+        URLByAppendingPathComponent:@"Chromium" isDirectory:YES]
+        URLByAppendingPathComponent:CmuxChromiumProfileName() isDirectory:YES];
     [NSFileManager.defaultManager createDirectoryAtURL:cacheURL withIntermediateDirectories:YES attributes:nil error:nil];
     SetCefString(&settings.root_cache_path, cacheURL.path);
     SetCefString(&settings.cache_path, [cacheURL URLByAppendingPathComponent:@"Default" isDirectory:YES].path);
