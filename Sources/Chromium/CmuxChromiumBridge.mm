@@ -480,6 +480,23 @@ void cmux_chromium_stop_loading(void *browserHandle) {
     WithBrowser(browserHandle, ^(cef_browser_t *browser) { browser->stop_load(browser); });
 }
 
+void cmux_chromium_set_focus(void *browserHandle, BOOL focus) {
+    cmux_chromium_browser_t *handle = (cmux_chromium_browser_t *)browserHandle;
+    if (!handle || !handle->browser) return;
+
+    NSView *browserView = AttachBrowserView(handle);
+    if (focus && browserView.window) {
+        [browserView.window makeFirstResponder:browserView];
+    } else if (!focus && browserView.window.firstResponder == browserView) {
+        [browserView.window makeFirstResponder:nil];
+    }
+
+    cef_browser_host_t *host = handle->browser->get_host(handle->browser);
+    if (!host) return;
+    host->set_focus(host, focus ? 1 : 0);
+    host->base.release(&host->base);
+}
+
 BOOL cmux_chromium_has_dev_tools(void *browserHandle) {
     cmux_chromium_browser_t *handle = (cmux_chromium_browser_t *)browserHandle;
     if (!handle || !handle->browser) return NO;

@@ -110,6 +110,8 @@ final class ChromiumBrowserHostView: NSView {
         nil
     }
 
+    override var acceptsFirstResponder: Bool { true }
+
     deinit {
         devToolsOpenTask?.cancel()
         if let devToolsDividerEventMonitor {
@@ -144,6 +146,16 @@ final class ChromiumBrowserHostView: NSView {
         } else {
             ensureBrowserCreated()
         }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        setBrowserFocused(true)
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        setBrowserFocused(false)
+        return true
     }
 
     override func updateTrackingAreas() {
@@ -223,6 +235,22 @@ final class ChromiumBrowserHostView: NSView {
     func stopLoading() {
         guard let browserHandle else { return }
         cmux_chromium_stop_loading(browserHandle)
+    }
+
+    func focusBrowserContent() {
+        guard browserHandle != nil else {
+            ensureBrowserCreated()
+            return
+        }
+        _ = window?.makeFirstResponder(self)
+        setBrowserFocused(true)
+    }
+
+    func clearBrowserContentFocus() {
+        if ownsFirstResponder {
+            _ = window?.makeFirstResponder(nil)
+        }
+        setBrowserFocused(false)
     }
 
     func executeJavaScript(_ script: String) {
@@ -482,6 +510,17 @@ final class ChromiumBrowserHostView: NSView {
             pendingJavaScript.forEach { cmux_chromium_execute_javascript(browserHandle, $0) }
             pendingJavaScript.removeAll()
         }
+    }
+
+    private func setBrowserFocused(_ focused: Bool) {
+        guard let browserHandle else { return }
+        cmux_chromium_set_focus(browserHandle, focused)
+    }
+
+    private var ownsFirstResponder: Bool {
+        guard let firstResponder = window?.firstResponder else { return false }
+        guard let view = firstResponder as? NSView else { return firstResponder === self }
+        return view === self || view.isDescendant(of: self)
     }
 
     @objc private func handleReactGrabMessageNotification(_ notification: Notification) {

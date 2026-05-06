@@ -4,6 +4,7 @@ import AppKit
 struct ChromiumViewRepresentable: NSViewRepresentable {
     @ObservedObject var panel: BrowserPanel
     let shouldFocusWebView: Bool
+    let isPanelFocused: Bool
 
     func makeNSView(context: Context) -> ChromiumBrowserHostView {
         panel.chromiumContentView()
@@ -12,8 +13,10 @@ struct ChromiumViewRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: ChromiumBrowserHostView, context: Context) {
         nsView.needsLayout = true
         nsView.layoutSubtreeIfNeeded()
-        if shouldFocusWebView, let window = nsView.window {
-            window.makeFirstResponder(nsView)
+        if shouldFocusWebView {
+            nsView.focusBrowserContent()
+        } else if !isPanelFocused {
+            nsView.clearBrowserContentFocus()
         }
     }
 }
