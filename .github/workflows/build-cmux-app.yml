@@ -163,8 +163,29 @@ jobs:
           path: artifacts/${{ env.ARTIFACT_NAME }}
           if-no-files-found: error
 
-      - name: Publish latest Chromium release
+      - name: Check whether build commit is still current main HEAD
         if: github.event_name != 'pull_request' && github.ref_name == 'main'
+        id: current-head
+        run: |
+          set -euo pipefail
+          CURRENT_MAIN_SHA="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          BUILD_SHA="$GITHUB_SHA"
+          if [ "$CURRENT_MAIN_SHA" = "$BUILD_SHA" ]; then
+            STILL_CURRENT=true
+          else
+            STILL_CURRENT=false
+          fi
+          echo "still-current=${STILL_CURRENT}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release publish guard"
+            echo
+            echo "- build sha: \`$BUILD_SHA\`"
+            echo "- current main sha: \`$CURRENT_MAIN_SHA\`"
+            echo "- publish chromium-latest: \`$STILL_CURRENT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish latest Chromium release
+        if: github.event_name != 'pull_request' && github.ref_name == 'main' && steps.current-head.outputs.still-current == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
