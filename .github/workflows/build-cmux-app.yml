@@ -15,6 +15,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  APP_NAME: cmux Chromium
+  APP_BUNDLE_ID: com.timobechtel.cmuxterm.app.chromium
   RELEASE_TAG: chromium-latest
   RELEASE_TITLE: cmux Chromium latest
   ARTIFACT_NAME: cmux-chromium-macos-arm64.zip
@@ -93,12 +95,28 @@ jobs:
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO \
+            PRODUCT_BUNDLE_IDENTIFIER="$APP_BUNDLE_ID" \
             build
+
+      - name: Rename fork app bundle
+        run: |
+          set -euo pipefail
+          APP_DIR="build-cmux-app/Build/Products/Release"
+          mv "$APP_DIR/cmux.app" "$APP_DIR/${APP_NAME}.app"
+
+      - name: Stamp fork app identity
+        run: |
+          set -euo pipefail
+          APP_PLIST="build-cmux-app/Build/Products/Release/${APP_NAME}.app/Contents/Info.plist"
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName ${APP_NAME}" "$APP_PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ${APP_NAME}" "$APP_PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${APP_BUNDLE_ID}" "$APP_PLIST"
 
       - name: Verify app bundle
         run: |
           set -euo pipefail
-          APP="build-cmux-app/Build/Products/Release/cmux.app"
+          APP="build-cmux-app/Build/Products/Release/${APP_NAME}.app"
           APP_BINARY="$APP/Contents/MacOS/cmux"
           CLI_BINARY="$APP/Contents/Resources/bin/cmux"
           GHOSTTY_HELPER="$APP/Contents/Resources/bin/ghostty"
@@ -112,23 +130,21 @@ jobs:
           test -f "$CEF_BINARY"
           test -x "$CHROMIUM_HELPER"
 
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")" = "$APP_BUNDLE_ID"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP/Contents/Info.plist")" = "$APP_NAME"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist")" = "$APP_NAME"
+
           for binary in "$APP_BINARY" "$CLI_BINARY" "$GHOSTTY_HELPER" "$CEF_BINARY" "$CHROMIUM_HELPER"; do
             archs="$(lipo -archs "$binary")"
             echo "$binary: $archs"
             [[ "$archs" == *arm64* ]]
           done
 
-      - name: Stamp fork app display name
-        run: |
-          set -euo pipefail
-          APP_PLIST="build-cmux-app/Build/Products/Release/cmux.app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 'cmux Chromium'" "$APP_PLIST"
-
       - name: Stamp dev version
         if: github.event_name != 'pull_request' && github.ref_name == 'main'
         run: |
           set -euo pipefail
-          APP_PLIST="build-cmux-app/Build/Products/Release/cmux.app/Contents/Info.plist"
+          APP_PLIST="build-cmux-app/Build/Products/Release/${APP_NAME}.app/Contents/Info.plist"
           BASE_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PLIST")
           SHORT_SHA="$(git rev-parse --short=9 HEAD)"
           DEV_VERSION="${BASE_VERSION}-chromium.${GITHUB_RUN_NUMBER}"
@@ -145,7 +161,7 @@ jobs:
         if: github.event_name != 'pull_request' && github.ref_name == 'main'
         run: |
           set -euo pipefail
-          APP_PLIST="build-cmux-app/Build/Products/Release/cmux.app/Contents/Info.plist"
+          APP_PLIST="build-cmux-app/Build/Products/Release/${APP_NAME}.app/Contents/Info.plist"
 
           /usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$APP_PLIST"
           /usr/libexec/PlistBuddy -c "Set :SUAutomaticallyUpdate false" "$APP_PLIST"
@@ -154,7 +170,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          ditto -c -k --keepParent "build-cmux-app/Build/Products/Release/cmux.app" "artifacts/${ARTIFACT_NAME}"
+          ditto -c -k --keepParent "build-cmux-app/Build/Products/Release/${APP_NAME}.app" "artifacts/${ARTIFACT_NAME}"
 
       - name: Upload app artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -196,6 +212,8 @@ jobs:
           cat > "$RELEASE_NOTES" <<EOF
           Latest unsigned cmux Chromium build from this fork.
 
+          - App: ${APP_NAME}
+          - Bundle ID: ${APP_BUNDLE_ID}
           - Version: ${DEV_VERSION}
           - Commit: ${SHORT_SHA}
           - Branch: ${GITHUB_REF_NAME}
