@@ -1,6 +1,14 @@
 import Foundation
 import AppKit
 
+struct ChromiumNavigationState {
+    let url: URL?
+    let title: String?
+    let isLoading: Bool?
+    let canGoBack: Bool
+    let canGoForward: Bool
+}
+
 @MainActor
 final class ChromiumBrowserHostView: NSView {
     private final class DevToolsDividerView: NSView {
@@ -82,7 +90,9 @@ final class ChromiumBrowserHostView: NSView {
     private static let devToolsDividerCursor = NSCursor.resizeLeftRight
     private static let devToolsWidthDefaultsKey = "chromiumDevToolsAttachedWidth"
     private static let reactGrabMessageNotification = Notification.Name("CmuxChromiumReactGrabMessageNotification")
+    private static let navigationStateNotification = Notification.Name("CmuxChromiumNavigationStateNotification")
     var onReactGrabMessage: (([String: Any]) -> Void)?
+    var onNavigationStateChanged: ((ChromiumNavigationState) -> Void)?
 
     init(initialURL: URL?) {
         pendingURL = initialURL
@@ -506,10 +516,40 @@ final class ChromiumBrowserHostView: NSView {
                     object: nil
                 )
                 isObservingReactGrabMessages = true
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleNavigationStateNotification(_:)),
+                    name: Self.navigationStateNotification,
+                    object: nil
+                )
             }
             pendingJavaScript.forEach { cmux_chromium_execute_javascript(browserHandle, $0) }
             pendingJavaScript.removeAll()
         }
+    }
+
+    @objc private func handleNavigationStateNotification(_ notification: Notification) {
+        guard let browserHandle,
+              let notifiedBrowserHandle = notification.userInfo?["browserHandle"] as? NSValue,
+              notifiedBrowserHandle.pointerValue == browserHandle else {
+            return
+        }
+
+        let rawURL = notification.userInfo?["url"] as? String
+        let url = rawURL.flatMap(URL.init(string:))
+        let title = notification.userInfo?["title"] as? String
+        let isLoading = notification.userInfo?["isLoading"] as? Bool
+        let canGoBack = (notification.userInfo?["canGoBack"] as? Bool) ?? false
+        let canGoForward = (notification.userInfo?["canGoForward"] as? Bool) ?? false
+        onNavigationStateChanged?(
+            ChromiumNavigationState(
+                url: url,
+                title: title,
+                isLoading: isLoading,
+                canGoBack: canGoBack,
+                canGoForward: canGoForward
+            )
+        )
     }
 
     private func setBrowserFocused(_ focused: Bool) {

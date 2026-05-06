@@ -11,12 +11,18 @@ extension BrowserPanel {
                 guard let message = ReactGrabBridgeMessage(body: body) else { return }
                 self?.handleReactGrabBridgeMessage(message)
             }
+            chromiumHostView.onNavigationStateChanged = { [weak self] state in
+                self?.applyChromiumNavigationState(state)
+            }
             return chromiumHostView
         }
         let view = ChromiumBrowserHostView(initialURL: currentURL)
         view.onReactGrabMessage = { [weak self] body in
             guard let message = ReactGrabBridgeMessage(body: body) else { return }
             self?.handleReactGrabBridgeMessage(message)
+        }
+        view.onNavigationStateChanged = { [weak self] state in
+            self?.applyChromiumNavigationState(state)
         }
         chromiumHostView = view
         return view

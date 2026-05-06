@@ -24,6 +24,7 @@
 static std::string g_last_error;
 static NSString *const CmuxChromiumReactGrabMessageNotification = @"CmuxChromiumReactGrabMessageNotification";
 static NSString *const CmuxChromiumReactGrabMessagePrefix = @"__CMUX_REACT_GRAB__";
+static NSString *const CmuxChromiumNavigationStateNotification = @"CmuxChromiumNavigationStateNotification";
 static BOOL g_initialized = NO;
 static NSTimer *g_message_loop_timer = nil;
 static NSTimer *g_scheduled_message_loop_timer = nil;
@@ -60,6 +61,11 @@ static void SetLastError(NSString *message) {
 static void SetCefString(cef_string_t *target, NSString *value) {
     const char *utf8 = value.UTF8String ?: "";
     cef_string_from_utf8(utf8, strlen(utf8), target);
+}
+
+static NSString *NSStringFromCefString(const cef_string_t *value) {
+    if (!value || !value->str || value->length == 0) return @"";
+    return [[NSString alloc] initWithCharacters:(const unichar *)value->str length:value->length] ?: @"";
 }
 
 @interface NSApplication (CmuxChromiumCefAppProtocol) <CefAppProtocol>
@@ -253,6 +259,54 @@ static int CEF_CALLBACK OnConsoleMessage(
     return 1;
 }
 
+static void PostNavigationState(cmux_chromium_client_t *client, cef_browser_t *browser, NSDictionary *changes) {
+    if (!client || !client->browser_handle || !browser) return;
+    NSMutableDictionary *payload = [NSMutableDictionary dictionaryWithDictionary:changes ?: @{}];
+    payload[@"browserHandle"] = [NSValue valueWithPointer:client->browser_handle];
+    payload[@"canGoBack"] = @(browser->can_go_back(browser) ? YES : NO);
+    payload[@"canGoForward"] = @(browser->can_go_forward(browser) ? YES : NO);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumNavigationStateNotification
+                                                          object:nil
+                                                        userInfo:payload];
+    });
+}
+
+static void CEF_CALLBACK OnAddressChange(
+    cef_display_handler_t *self,
+    cef_browser_t *browser,
+    cef_frame_t *frame,
+    const cef_string_t *url
+) {
+    if (frame && !frame->is_main(frame)) return;
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, display_handler));
+    PostNavigationState(client, browser, @{ @"url": NSStringFromCefString(url) });
+}
+
+static void CEF_CALLBACK OnTitleChange(
+    cef_display_handler_t *self,
+    cef_browser_t *browser,
+    const cef_string_t *title
+) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, display_handler));
+    PostNavigationState(client, browser, @{ @"title": NSStringFromCefString(title) });
+}
+
+static void CEF_CALLBACK OnLoadingStateChange(
+    cef_load_handler_t *self,
+    cef_browser_t *browser,
+    int is_loading,
+    int can_go_back,
+    int can_go_forward
+) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, load_handler));
+    PostNavigationState(client, browser, @{
+        @"isLoading": @(is_loading ? YES : NO),
+        @"canGoBack": @(can_go_back ? YES : NO),
+        @"canGoForward": @(can_go_forward ? YES : NO)
+    });
+}
+
 static void CEF_CALLBACK OnAfterCreated(cef_life_span_handler_t *self, cef_browser_t *browser) {
     browser->base.release(&browser->base);
 }
@@ -268,7 +322,10 @@ static cmux_chromium_client_t *CreateClient(void) {
     client->client.get_load_handler = GetLoadHandler;
     client->life_span_handler.on_after_created = OnAfterCreated;
     client->life_span_handler.on_before_close = OnBeforeClose;
+    client->display_handler.on_address_change = OnAddressChange;
+    client->display_handler.on_title_change = OnTitleChange;
     client->display_handler.on_console_message = OnConsoleMessage;
+    client->load_handler.on_loading_state_change = OnLoadingStateChange;
     return client;
 }
 

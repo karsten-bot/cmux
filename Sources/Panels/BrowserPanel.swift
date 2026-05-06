@@ -4009,7 +4009,6 @@ final class BrowserPanel: Panel, ObservableObject {
             if let url = effectiveRequest.url {
                 chromiumContentView().load(url)
             }
-            nativeCanGoBack = true
             refreshNavigationAvailability()
             return
         }
@@ -5782,6 +5781,26 @@ extension BrowserPanel {
         if canGoForward != resolvedCanGoForward {
             canGoForward = resolvedCanGoForward
         }
+    }
+
+    func applyChromiumNavigationState(_ state: ChromiumNavigationState) {
+        guard usesChromiumEngine else { return }
+        if let url = state.url {
+            currentURL = Self.remoteProxyDisplayURL(for: url)
+        }
+        if let title = state.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            pageTitle = title
+            if let currentURL {
+                historyStore.recordVisit(url: currentURL, title: title)
+            }
+        }
+        if let isLoading = state.isLoading {
+            self.isLoading = isLoading
+            estimatedProgress = isLoading ? 0.35 : 1.0
+        }
+        nativeCanGoBack = state.canGoBack
+        nativeCanGoForward = state.canGoForward
+        refreshNavigationAvailability()
     }
 
     private func abandonRestoredSessionHistoryIfNeeded() {
