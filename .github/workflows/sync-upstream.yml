@@ -58,4 +58,5 @@ jobs:
       - name: Trigger app build
         env:
           GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: gh workflow run build-cmux-app.yml --ref main
