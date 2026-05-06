@@ -23,6 +23,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.SYNC_UPSTREAM_TOKEN }}
 
       - name: Rebase main onto upstream
         run: |
@@ -56,5 +57,5 @@ jobs:
 
       - name: Trigger app build
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_TOKEN }}
         run: gh workflow run build-cmux-app.yml --ref main
