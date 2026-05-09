@@ -13,18 +13,23 @@ enum UpdateSettings {
     static let scheduledCheckInterval: TimeInterval = 60 * 60
 
     static func apply(to defaults: UserDefaults) {
+        let defaultAutomaticChecksEnabled =
+            Bundle.main.object(forInfoDictionaryKey: automaticChecksKey) as? Bool ?? true
         defaults.register(defaults: [
-            automaticChecksKey: true,
+            automaticChecksKey: defaultAutomaticChecksEnabled,
             automaticallyUpdateKey: false,
             scheduledCheckIntervalKey: scheduledCheckInterval,
             sendProfileInfoKey: false,
         ])
 
+        if !defaultAutomaticChecksEnabled {
+            defaults.set(false, forKey: automaticChecksKey)
+        }
+
         guard !defaults.bool(forKey: migrationKey) else { return }
 
-        // Repair older installs that may have ended up with automatic checks disabled
-        // before the updater defaults were embedded in Info.plist.
-        defaults.set(true, forKey: automaticChecksKey)
+        // Align older installs with the automatic-check default embedded in Info.plist.
+        defaults.set(defaultAutomaticChecksEnabled, forKey: automaticChecksKey)
 
         if let interval = defaults.object(forKey: scheduledCheckIntervalKey) as? NSNumber {
             let currentInterval = interval.doubleValue
