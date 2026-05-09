@@ -4805,6 +4805,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return
         }
         let firstResponder = window.firstResponder
+        if let firstResponder {
+            for (candidatePanelId, panel) in workspace.panels where candidatePanelId != panelId {
+                guard !(panel is TerminalPanel),
+                      panel.ownedFocusIntent(for: firstResponder, in: window) != nil else {
+                    continue
+                }
+#if DEBUG
+                cmuxDebugLog(
+                    "focus.keyRepair skip reason=foreignPanelResponder " +
+                    "workspace=\(String(workspace.id.uuidString.prefix(5))) " +
+                    "focusedPanel=\(String(panelId.uuidString.prefix(5))) " +
+                    "responderPanel=\(String(candidatePanelId.uuidString.prefix(5))) " +
+                    "fr=\(String(describing: type(of: firstResponder)))"
+                )
+#endif
+                return
+            }
+        }
         if normalizedFlags.contains(.command) {
             let responderHasViableOwner = firstResponder.map { responderHasViableKeyRoutingOwner($0, in: window) } ?? false
             let commandEquivalentNeedsRepair = shouldRepairFocusedTerminalCommandEquivalentInputs(
