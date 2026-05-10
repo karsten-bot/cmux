@@ -119,6 +119,8 @@ typedef struct cmux_chromium_browser_t {
     NSView *__unsafe_unretained parent_view;
     cef_browser_t *browser;
     cmux_chromium_client_t *client;
+    NSRect last_sent_bounds;
+    BOOL has_sent_bounds;
     BOOL is_closing;
 } cmux_chromium_browser_t;
 
@@ -158,6 +160,21 @@ static void AppendSwitchWithValue(cef_command_line_t *command_line, const char *
     cef_string_clear(&cef_value);
 }
 
+static int CmuxChromiumRemoteDebuggingPortValue(void) {
+    static int port = 0;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *identifier = NSBundle.mainBundle.bundleIdentifier ?: NSBundle.mainBundle.executablePath ?: @"cmux";
+        uint32_t hash = 2166136261u;
+        for (NSUInteger index = 0; index < identifier.length; index++) {
+            hash ^= [identifier characterAtIndex:index];
+            hash *= 16777619u;
+        }
+        port = 40000 + (int)(hash % 20000);
+    });
+    return port;
+}
+
 static void CEF_CALLBACK OnBeforeCommandLineProcessing(
     cef_app_t *self,
     const cef_string_t *process_type,
@@ -168,7 +185,9 @@ static void CEF_CALLBACK OnBeforeCommandLineProcessing(
     AppendSwitch(command_line, "disable-domain-reliability");
     AppendSwitch(command_line, "disable-sync");
     AppendSwitch(command_line, "use-mock-keychain");
-    AppendSwitchWithValue(command_line, "remote-allow-origins", "http://127.0.0.1:9223");
+    char remoteOrigin[64];
+    snprintf(remoteOrigin, sizeof(remoteOrigin), "http://127.0.0.1:%d", CmuxChromiumRemoteDebuggingPortValue());
+    AppendSwitchWithValue(command_line, "remote-allow-origins", remoteOrigin);
     AppendSwitchWithValue(
         command_line,
         "disable-features",
@@ -271,12 +290,19 @@ static cef_load_handler_t *CEF_CALLBACK GetLoadHandler(cef_client_t *self) {
 
 static void CEF_CALLBACK OnBeforeClose(cef_life_span_handler_t *self, cef_browser_t *browser) {
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, life_span_handler));
+    cmux_chromium_browser_t *handle = client->browser_handle;
     if (client->browser_handle && client->browser_handle->browser == browser) {
         client->browser_handle->browser = nullptr;
         client->browser_handle->parent_view = nil;
         client->browser_handle->is_closing = YES;
+        client->browser_handle->client = nullptr;
+        client->browser_handle = nullptr;
     }
     browser->base.release(&browser->base);
+    if (handle) {
+        free(handle);
+    }
+    free(client);
 }
 
 static int CEF_CALLBACK OnConsoleMessage(
@@ -295,12 +321,13 @@ static int CEF_CALLBACK OnConsoleMessage(
     }
 
     NSString *payload = [text substringFromIndex:CmuxChromiumReactGrabMessagePrefix.length];
+    cmux_chromium_browser_t *browser_handle = client->browser_handle;
+    if (!browser_handle) return 0;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!client->browser_handle) return;
         [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumReactGrabMessageNotification
                                                           object:nil
                                                         userInfo:@{
-                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"browserHandle": [NSValue valueWithPointer:browser_handle],
                                                             @"payload": payload
                                                         }];
     });
@@ -413,7 +440,7 @@ BOOL cmux_chromium_initialize(void) {
     settings.size = sizeof(cef_settings_t);
     settings.no_sandbox = 1;
     settings.external_message_pump = 1;
-    settings.remote_debugging_port = 9223;
+    settings.remote_debugging_port = CmuxChromiumRemoteDebuggingPortValue();
     SetCefString(&settings.browser_subprocess_path, CmuxChromiumHelperPath());
     SetCefString(&settings.framework_dir_path, CmuxChromiumFrameworkDirectoryPath());
     SetCefString(&settings.main_bundle_path, NSBundle.mainBundle.bundlePath);
@@ -448,6 +475,10 @@ BOOL cmux_chromium_initialize(void) {
 
 const char *cmux_chromium_last_error(void) {
     return g_last_error.c_str();
+}
+
+int cmux_chromium_remote_debugging_port(void) {
+    return CmuxChromiumRemoteDebuggingPortValue();
 }
 
 void *cmux_chromium_create_browser(NSView *parentView, const char *url) {
@@ -507,7 +538,9 @@ static NSView *AttachBrowserView(cmux_chromium_browser_t *handle) {
     }
 
     browserView.hidden = NO;
-    browserView.frame = handle->parent_view.bounds;
+    if (!NSEqualRects(browserView.frame, handle->parent_view.bounds)) {
+        browserView.frame = handle->parent_view.bounds;
+    }
     browserView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     return browserView;
 }
@@ -517,6 +550,12 @@ void cmux_chromium_resize_browser(void *browserHandle) {
     if (!handle || !handle->parent_view) return;
     AttachBrowserView(handle);
     if (!handle->browser) return;
+    NSRect bounds = handle->parent_view.bounds;
+    if (handle->has_sent_bounds && NSEqualRects(handle->last_sent_bounds, bounds)) {
+        return;
+    }
+    handle->last_sent_bounds = bounds;
+    handle->has_sent_bounds = YES;
     cef_browser_host_t *host = handle->browser->get_host(handle->browser);
     if (!host) return;
     host->was_resized(host);

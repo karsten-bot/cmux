@@ -8,6 +8,7 @@ extern "C" {
 
 BOOL cmux_chromium_runtime_available(void);
 BOOL cmux_chromium_initialize(void);
+int cmux_chromium_remote_debugging_port(void);
 const char *cmux_chromium_last_error(void);
 void * _Nullable cmux_chromium_create_browser(NSView *parentView, const char *url);
 void cmux_chromium_close_browser(void *browserHandle);

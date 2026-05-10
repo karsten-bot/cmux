@@ -338,6 +338,10 @@ final class ChromiumBrowserHostView: NSView {
         if let browserHandle {
             cmux_chromium_resize_browser(browserHandle)
         }
+        if let devToolsBrowserHandle {
+            cmux_chromium_close_browser(devToolsBrowserHandle)
+            self.devToolsBrowserHandle = nil
+        }
     }
 
     func beginDevToolsDividerDrag() {
@@ -584,10 +588,11 @@ final class ChromiumBrowserHostView: NSView {
     }
 
     private static func resolveDevToolsFrontendURL(for pageURL: URL?) async -> URL? {
-        let endpoint = URL(string: "http://127.0.0.1:9223/json/list")!
+        let port = cmux_chromium_remote_debugging_port()
+        let endpoint = URL(string: "http://127.0.0.1:\(port)/json/list")!
         for _ in 0..<20 {
             if Task.isCancelled { return nil }
-            if let url = await fetchDevToolsFrontendURL(endpoint: endpoint, pageURL: pageURL) {
+            if let url = await fetchDevToolsFrontendURL(endpoint: endpoint, pageURL: pageURL, port: port) {
                 return url
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -595,7 +600,7 @@ final class ChromiumBrowserHostView: NSView {
         return nil
     }
 
-    private static func fetchDevToolsFrontendURL(endpoint: URL, pageURL: URL?) async -> URL? {
+    private static func fetchDevToolsFrontendURL(endpoint: URL, pageURL: URL?, port: Int32) async -> URL? {
         guard let (data, _) = try? await URLSession.shared.data(from: endpoint),
               let targets = try? JSONDecoder().decode([DevToolsTarget].self, from: data) else {
             return nil
@@ -615,16 +620,15 @@ final class ChromiumBrowserHostView: NSView {
 
         guard let target else { return nil }
         if let websocket = target.webSocketDebuggerUrl,
-           let wsURL = URL(string: websocket),
            let range = websocket.range(of: "://") {
             let wsTarget = String(websocket[range.upperBound...])
-            return URL(string: "http://127.0.0.1:9223/devtools/inspector.html?ws=\(wsTarget)")
+            return URL(string: "http://127.0.0.1:\(port)/devtools/inspector.html?ws=\(wsTarget)")
         }
         if let frontend = target.devtoolsFrontendUrl, !frontend.isEmpty {
             if frontend.hasPrefix("http://") || frontend.hasPrefix("https://") {
                 return URL(string: frontend)
             }
-            return URL(string: "http://127.0.0.1:9223\(frontend)")
+            return URL(string: "http://127.0.0.1:\(port)\(frontend)")
         }
         return nil
     }
