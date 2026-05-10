@@ -26,8 +26,8 @@ static NSString *const CmuxChromiumReactGrabMessageNotification = @"CmuxChromium
 static NSString *const CmuxChromiumReactGrabMessagePrefix = @"__CMUX_REACT_GRAB__";
 static NSString *const CmuxChromiumNavigationStateNotification = @"CmuxChromiumNavigationStateNotification";
 static BOOL g_initialized = NO;
-static NSTimer *g_message_loop_timer = nil;
 static NSTimer *g_scheduled_message_loop_timer = nil;
+static NSTimeInterval g_scheduled_message_loop_deadline = 0;
 static char **g_argv = nullptr;
 
 static NSString *CmuxChromiumFrameworkPath(void) {
@@ -179,17 +179,31 @@ static void CmuxDoMessageLoopWork(void) {
     }
 }
 
+static void CmuxScheduleMessageLoopWorkOnMain(int64_t delay_ms) {
+    NSTimeInterval delaySeconds = MAX(0, delay_ms) / 1000.0;
+    NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + delaySeconds;
+
+    if (g_scheduled_message_loop_timer && g_scheduled_message_loop_deadline <= deadline) {
+        return;
+    }
+
+    [g_scheduled_message_loop_timer invalidate];
+    g_scheduled_message_loop_deadline = deadline;
+    g_scheduled_message_loop_timer = [NSTimer scheduledTimerWithTimeInterval:delaySeconds
+                                                                      repeats:NO
+                                                                        block:^(__unused NSTimer *timer) {
+        g_scheduled_message_loop_timer = nil;
+        g_scheduled_message_loop_deadline = 0;
+        CmuxDoMessageLoopWork();
+    }];
+}
+
 static void CEF_CALLBACK OnScheduleMessagePumpWork(
     cef_browser_process_handler_t *self,
     int64_t delay_ms
 ) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        [g_scheduled_message_loop_timer invalidate];
-        g_scheduled_message_loop_timer = [NSTimer scheduledTimerWithTimeInterval:MAX(0, delay_ms) / 1000.0
-                                                                          repeats:NO
-                                                                            block:^(__unused NSTimer *timer) {
-            CmuxDoMessageLoopWork();
-        }];
+        CmuxScheduleMessageLoopWorkOnMain(delay_ms);
     });
 }
 
@@ -399,9 +413,7 @@ BOOL cmux_chromium_initialize(void) {
     cef_string_clear(&settings.log_file);
 
     g_initialized = YES;
-    g_message_loop_timer = [NSTimer scheduledTimerWithTimeInterval:0.01 repeats:YES block:^(__unused NSTimer *timer) {
-        CmuxDoMessageLoopWork();
-    }];
+    CmuxScheduleMessageLoopWorkOnMain(0);
     return YES;
 }
 
