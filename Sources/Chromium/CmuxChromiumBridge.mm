@@ -6,7 +6,9 @@
 #import <objc/runtime.h>
 
 #include <dispatch/dispatch.h>
+#include <limits.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string>
 #include <string.h>
 
@@ -27,7 +29,8 @@ static NSString *const CmuxChromiumReactGrabMessagePrefix = @"__CMUX_REACT_GRAB_
 static NSString *const CmuxChromiumNavigationStateNotification = @"CmuxChromiumNavigationStateNotification";
 static BOOL g_initialized = NO;
 static NSTimer *g_scheduled_message_loop_timer = nil;
-static NSTimeInterval g_scheduled_message_loop_deadline = 0;
+static BOOL g_message_loop_working = NO;
+static BOOL g_message_loop_reentrant = NO;
 static char **g_argv = nullptr;
 
 static NSString *CmuxChromiumFrameworkPath(void) {
@@ -173,38 +176,64 @@ static void CEF_CALLBACK OnBeforeCommandLineProcessing(
     );
 }
 
-static void CmuxDoMessageLoopWork(void) {
-    if (g_initialized) {
-        cef_do_message_loop_work();
-    }
-}
+static const int64_t CmuxMessageLoopMaxDelayMs = 1000 / 30;
+static const int64_t CmuxMessageLoopIdleDelayPlaceholderMs = INT_MAX;
+
+static void CmuxDoMessageLoopWork(void);
 
 static void CmuxScheduleMessageLoopWorkOnMain(int64_t delay_ms) {
-    NSTimeInterval delaySeconds = MAX(0, delay_ms) / 1000.0;
-    NSTimeInterval deadline = [NSDate timeIntervalSinceReferenceDate] + delaySeconds;
-
-    if (g_scheduled_message_loop_timer && g_scheduled_message_loop_deadline <= deadline) {
+    if (delay_ms == CmuxMessageLoopIdleDelayPlaceholderMs && g_scheduled_message_loop_timer) {
         return;
     }
 
     [g_scheduled_message_loop_timer invalidate];
-    g_scheduled_message_loop_deadline = deadline;
-    g_scheduled_message_loop_timer = [NSTimer scheduledTimerWithTimeInterval:delaySeconds
-                                                                      repeats:NO
-                                                                        block:^(__unused NSTimer *timer) {
+    g_scheduled_message_loop_timer = nil;
+
+    if (delay_ms <= 0) {
+        CmuxDoMessageLoopWork();
+        return;
+    }
+
+    NSTimeInterval delaySeconds = MIN(delay_ms, CmuxMessageLoopMaxDelayMs) / 1000.0;
+    g_scheduled_message_loop_timer = [NSTimer timerWithTimeInterval:delaySeconds repeats:NO block:^(__unused NSTimer *timer) {
         g_scheduled_message_loop_timer = nil;
-        g_scheduled_message_loop_deadline = 0;
         CmuxDoMessageLoopWork();
     }];
+    [NSRunLoop.currentRunLoop addTimer:g_scheduled_message_loop_timer forMode:NSRunLoopCommonModes];
+    [NSRunLoop.currentRunLoop addTimer:g_scheduled_message_loop_timer forMode:NSEventTrackingRunLoopMode];
+}
+
+static void CmuxPostMessageLoopWork(int64_t delay_ms) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CmuxScheduleMessageLoopWorkOnMain(delay_ms);
+    });
+}
+
+static void CmuxDoMessageLoopWork(void) {
+    if (!g_initialized) return;
+
+    if (g_message_loop_working) {
+        g_message_loop_reentrant = YES;
+        return;
+    }
+
+    g_message_loop_reentrant = NO;
+    g_message_loop_working = YES;
+    cef_do_message_loop_work();
+    g_message_loop_working = NO;
+
+    if (g_message_loop_reentrant) {
+        CmuxPostMessageLoopWork(0);
+    } else if (!g_scheduled_message_loop_timer) {
+        CmuxPostMessageLoopWork(CmuxMessageLoopIdleDelayPlaceholderMs);
+    }
 }
 
 static void CEF_CALLBACK OnScheduleMessagePumpWork(
     cef_browser_process_handler_t *self,
     int64_t delay_ms
 ) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        CmuxScheduleMessageLoopWorkOnMain(delay_ms);
-    });
+    CmuxPostMessageLoopWork(delay_ms);
 }
 
 static cef_browser_process_handler_t *CEF_CALLBACK GetBrowserProcessHandler(cef_app_t *self) {
