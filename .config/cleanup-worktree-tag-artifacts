@@ -1,0 +1,131 @@
+#!/usr/bin/env zsh
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: cleanup-worktree-tag-artifacts --repo <name> [--branch <name>] [--worktree-name <name>] [--worktree-path <path>] [--dry-run]
+
+Remove tagged cmux build artifacts for a removed Worktrunk worktree.
+EOF
+}
+
+slugify() {
+  printf '%s' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's#[^a-z0-9]+#-#g; s#^-+##; s#-+$##; s#-+#-#g'
+}
+
+repo=""
+branch=""
+worktree_name=""
+worktree_path=""
+dry_run=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo)
+      [[ $# -lt 2 ]] && usage >&2 && exit 2
+      repo="$2"
+      shift 2
+      ;;
+    --branch)
+      [[ $# -lt 2 ]] && usage >&2 && exit 2
+      branch="$2"
+      shift 2
+      ;;
+    --worktree-name)
+      [[ $# -lt 2 ]] && usage >&2 && exit 2
+      worktree_name="$2"
+      shift 2
+      ;;
+    --worktree-path)
+      [[ $# -lt 2 ]] && usage >&2 && exit 2
+      worktree_path="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$repo" ]]; then
+  echo "Missing required --repo" >&2
+  usage >&2
+  exit 2
+fi
+
+typeset -a tags
+typeset -A seen
+typeset -A seen_paths
+
+add_tag() {
+  local tag
+
+  tag="$(slugify "$1")"
+  [[ -n "$tag" ]] || return 0
+  [[ -n "${seen[$tag]:-}" ]] && return 0
+  seen[$tag]=1
+  tags+=("$tag")
+}
+
+add_tag "$branch"
+add_tag "$worktree_name"
+
+add_path() {
+  local artifact_path="$1"
+
+  [[ -n "$artifact_path" ]] || return 0
+  [[ -n "${seen_paths[$artifact_path]:-}" ]] && return 0
+  seen_paths[$artifact_path]=1
+
+  if [[ "$dry_run" == "true" ]]; then
+    [[ -e "$artifact_path" ]] && printf '%s\n' "$artifact_path"
+  else
+    rm -rf "$artifact_path"
+  fi
+}
+
+add_derived_data_path() {
+  local derived_data_path="$1"
+  local workspace_path
+
+  [[ -d "$derived_data_path" ]] || return 0
+  if [[ -n "$worktree_path" ]]; then
+    workspace_path="$(/usr/bin/plutil -extract WorkspacePath raw -o - "${derived_data_path}/info.plist" 2>/dev/null || true)"
+    [[ "$workspace_path" == "$worktree_path/"* ]] || return 0
+  fi
+  add_path "$derived_data_path"
+}
+
+add_tag_artifacts() {
+  local tag="$1"
+
+  add_derived_data_path "${HOME}/Library/Developer/Xcode/DerivedData/${repo}-${tag}"
+  add_path "/tmp/${repo}-${tag}"
+  add_path "/tmp/${repo}-debug-${tag}.sock"
+  add_path "/tmp/${repo}-debug-${tag}.log"
+  add_path "${HOME}/Library/Application Support/${repo}/${repo}d-dev-${tag}.sock"
+}
+
+for tag in "${tags[@]}"; do
+  pkill -f "${repo} DEV ${tag}.app/Contents/MacOS/${repo} DEV" || true
+  add_tag_artifacts "$tag"
+done
+
+if [[ -n "$worktree_path" ]]; then
+  derived_data_root="${HOME}/Library/Developer/Xcode/DerivedData"
+  while IFS= read -r -d '' derived_data_path; do
+    add_derived_data_path "$derived_data_path"
+  done < <(find "$derived_data_root" -maxdepth 1 -type d -name "${repo}-*" -print0 2>/dev/null)
+fi

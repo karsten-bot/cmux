@@ -1,0 +1,2 @@
+[post-remove]
+cleanup-tag-artifacts = ".config/cleanup-worktree-tag-artifacts --repo {{ repo }} --branch {{ branch | default('') }} --worktree-name {{ worktree_name | default('') }} --worktree-path {{ worktree_path }}"
