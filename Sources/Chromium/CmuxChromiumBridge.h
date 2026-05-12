@@ -12,6 +12,7 @@ int cmux_chromium_remote_debugging_port(void);
 const char *cmux_chromium_last_error(void);
 void * _Nullable cmux_chromium_create_browser(NSView *parentView, const char *url);
 void cmux_chromium_close_browser(void *browserHandle);
+void cmux_chromium_dispose_browser(void *browserHandle);
 void cmux_chromium_resize_browser(void *browserHandle);
 void cmux_chromium_load_url(void *browserHandle, const char *url);
 void cmux_chromium_execute_javascript(void *browserHandle, const char *script);

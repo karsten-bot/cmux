@@ -27,6 +27,7 @@ static std::string g_last_error;
 static NSString *const CmuxChromiumReactGrabMessageNotification = @"CmuxChromiumReactGrabMessageNotification";
 static NSString *const CmuxChromiumReactGrabMessagePrefix = @"__CMUX_REACT_GRAB__";
 static NSString *const CmuxChromiumNavigationStateNotification = @"CmuxChromiumNavigationStateNotification";
+static NSString *const CmuxChromiumBrowserClosedNotification = @"CmuxChromiumBrowserClosedNotification";
 static BOOL g_initialized = NO;
 static NSTimer *g_scheduled_message_loop_timer = nil;
 static BOOL g_message_loop_working = NO;
@@ -122,6 +123,7 @@ typedef struct cmux_chromium_browser_t {
     NSRect last_sent_bounds;
     BOOL has_sent_bounds;
     BOOL is_closing;
+    BOOL dispose_when_closed;
 } cmux_chromium_browser_t;
 
 typedef struct {
@@ -291,16 +293,24 @@ static cef_load_handler_t *CEF_CALLBACK GetLoadHandler(cef_client_t *self) {
 static void CEF_CALLBACK OnBeforeClose(cef_life_span_handler_t *self, cef_browser_t *browser) {
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, life_span_handler));
     cmux_chromium_browser_t *handle = client->browser_handle;
-    if (client->browser_handle && client->browser_handle->browser == browser) {
-        client->browser_handle->browser = nullptr;
-        client->browser_handle->parent_view = nil;
-        client->browser_handle->is_closing = YES;
-        client->browser_handle->client = nullptr;
+    if (handle && handle->browser == browser) {
+        handle->browser = nullptr;
+        handle->parent_view = nil;
+        handle->is_closing = YES;
+        handle->client = nullptr;
         client->browser_handle = nullptr;
     }
     browser->base.release(&browser->base);
     if (handle) {
-        free(handle);
+        if (handle->dispose_when_closed) {
+            free(handle);
+        } else {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumBrowserClosedNotification
+                                                                  object:nil
+                                                                userInfo:@{ @"browserHandle": [NSValue valueWithPointer:handle] }];
+            });
+        }
     }
     free(client);
 }
@@ -386,6 +396,21 @@ static void CEF_CALLBACK OnAfterCreated(cef_life_span_handler_t *self, cef_brows
     browser->base.release(&browser->base);
 }
 
+static int CEF_CALLBACK DoClose(cef_life_span_handler_t *self, cef_browser_t *browser) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, life_span_handler));
+    cmux_chromium_browser_t *handle = client->browser_handle;
+    if (handle && handle->browser == browser) {
+        handle->is_closing = YES;
+    }
+    cef_browser_host_t *host = browser->get_host(browser);
+    if (host) {
+        NSView *browserView = (__bridge NSView *)host->get_window_handle(host);
+        [browserView removeFromSuperview];
+        host->base.release(&host->base);
+    }
+    return 1;
+}
+
 static cmux_chromium_client_t *CreateClient(void) {
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)calloc(1, sizeof(cmux_chromium_client_t));
     InitBase(&client->client.base, sizeof(cef_client_t));
@@ -396,6 +421,7 @@ static cmux_chromium_client_t *CreateClient(void) {
     client->client.get_display_handler = GetDisplayHandler;
     client->client.get_load_handler = GetLoadHandler;
     client->life_span_handler.on_after_created = OnAfterCreated;
+    client->life_span_handler.do_close = DoClose;
     client->life_span_handler.on_before_close = OnBeforeClose;
     client->display_handler.on_address_change = OnAddressChange;
     client->display_handler.on_title_change = OnTitleChange;
@@ -573,6 +599,19 @@ void cmux_chromium_close_browser(void *browserHandle) {
         host->close_browser(host, 1);
         host->base.release(&host->base);
     }
+}
+
+void cmux_chromium_dispose_browser(void *browserHandle) {
+    cmux_chromium_browser_t *handle = (cmux_chromium_browser_t *)browserHandle;
+    if (!handle) return;
+
+    if (!handle->browser) {
+        free(handle);
+        return;
+    }
+
+    handle->dispose_when_closed = YES;
+    cmux_chromium_close_browser(handle);
 }
 
 static void WithBrowser(void *browserHandle, void (^block)(cef_browser_t *browser)) {

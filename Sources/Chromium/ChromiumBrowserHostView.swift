@@ -77,7 +77,7 @@ final class ChromiumBrowserHostView: NSView {
     private var devToolsDividerEventMonitor: Any?
     private var devToolsDividerTrackingArea: NSTrackingArea?
     private var pendingJavaScript: [String] = []
-    private var isObservingReactGrabMessages = false
+    private var isObservingBrowserNotifications = false
     private let pageContainerView = NSView(frame: .zero)
     private let devToolsContainerView = NSView(frame: .zero)
     private lazy var devToolsDividerView = DevToolsDividerView(hostView: self)
@@ -91,6 +91,7 @@ final class ChromiumBrowserHostView: NSView {
     private static let devToolsWidthDefaultsKey = "chromiumDevToolsAttachedWidth"
     private static let reactGrabMessageNotification = Notification.Name("CmuxChromiumReactGrabMessageNotification")
     private static let navigationStateNotification = Notification.Name("CmuxChromiumNavigationStateNotification")
+    private static let browserClosedNotification = Notification.Name("CmuxChromiumBrowserClosedNotification")
     var onReactGrabMessage: (([String: Any]) -> Void)?
     var onNavigationStateChanged: ((ChromiumNavigationState) -> Void)?
 
@@ -132,10 +133,10 @@ final class ChromiumBrowserHostView: NSView {
         }
         NotificationCenter.default.removeObserver(self)
         if let devToolsBrowserHandle {
-            cmux_chromium_close_browser(devToolsBrowserHandle)
+            cmux_chromium_dispose_browser(devToolsBrowserHandle)
         }
         if let browserHandle {
-            cmux_chromium_close_browser(browserHandle)
+            cmux_chromium_dispose_browser(browserHandle)
         }
     }
 
@@ -326,21 +327,10 @@ final class ChromiumBrowserHostView: NSView {
     }
 
     func closeDeveloperTools() {
-        devToolsOpenTask?.cancel()
-        devToolsOpenTask = nil
-        devToolsVisible = false
-        isDraggingDevToolsDivider = false
-        devToolsContainerView.isHidden = true
-        devToolsDividerView.isHidden = true
-        removeDevToolsDividerEventMonitor()
-        layoutChromiumSubviews()
-        window?.invalidateCursorRects(for: self)
-        if let browserHandle {
-            cmux_chromium_resize_browser(browserHandle)
-        }
+        hideDeveloperToolsChrome()
         if let devToolsBrowserHandle {
-            cmux_chromium_close_browser(devToolsBrowserHandle)
             self.devToolsBrowserHandle = nil
+            cmux_chromium_dispose_browser(devToolsBrowserHandle)
         }
     }
 
@@ -512,23 +502,45 @@ final class ChromiumBrowserHostView: NSView {
             cmuxDebugLog("browser.chromium.create.failed \(message)")
             #endif
         } else if let browserHandle {
-            if !isObservingReactGrabMessages {
+            if !isObservingBrowserNotifications {
                 NotificationCenter.default.addObserver(
                     self,
                     selector: #selector(handleReactGrabMessageNotification(_:)),
                     name: Self.reactGrabMessageNotification,
                     object: nil
                 )
-                isObservingReactGrabMessages = true
+                isObservingBrowserNotifications = true
                 NotificationCenter.default.addObserver(
                     self,
                     selector: #selector(handleNavigationStateNotification(_:)),
                     name: Self.navigationStateNotification,
                     object: nil
                 )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleBrowserClosedNotification(_:)),
+                    name: Self.browserClosedNotification,
+                    object: nil
+                )
             }
             pendingJavaScript.forEach { cmux_chromium_execute_javascript(browserHandle, $0) }
             pendingJavaScript.removeAll()
+        }
+    }
+
+    @objc private func handleBrowserClosedNotification(_ notification: Notification) {
+        guard let closedBrowserHandle = notification.userInfo?["browserHandle"] as? NSValue else {
+            return
+        }
+
+        guard let pointer = closedBrowserHandle.pointerValue else { return }
+        if pointer == devToolsBrowserHandle {
+            devToolsBrowserHandle = nil
+            hideDeveloperToolsChrome()
+            cmux_chromium_dispose_browser(pointer)
+        } else if pointer == browserHandle {
+            browserHandle = nil
+            cmux_chromium_dispose_browser(pointer)
         }
     }
 
@@ -559,6 +571,21 @@ final class ChromiumBrowserHostView: NSView {
     private func setBrowserFocused(_ focused: Bool) {
         guard let browserHandle else { return }
         cmux_chromium_set_focus(browserHandle, focused)
+    }
+
+    private func hideDeveloperToolsChrome() {
+        devToolsOpenTask?.cancel()
+        devToolsOpenTask = nil
+        devToolsVisible = false
+        isDraggingDevToolsDivider = false
+        devToolsContainerView.isHidden = true
+        devToolsDividerView.isHidden = true
+        removeDevToolsDividerEventMonitor()
+        layoutChromiumSubviews()
+        window?.invalidateCursorRects(for: self)
+        if let browserHandle {
+            cmux_chromium_resize_browser(browserHandle)
+        }
     }
 
     private var ownsFirstResponder: Bool {
