@@ -17,6 +17,7 @@
 #include "include/capi/cef_browser_process_handler_capi.h"
 #include "include/capi/cef_display_handler_capi.h"
 #include "include/capi/cef_download_handler_capi.h"
+#include "include/capi/cef_find_handler_capi.h"
 #include "include/capi/cef_frame_capi.h"
 #include "include/capi/cef_life_span_handler_capi.h"
 #include "include/capi/cef_load_handler_capi.h"
@@ -33,6 +34,7 @@ static NSString *const CmuxChromiumBrowserClosedNotification = @"CmuxChromiumBro
 static NSString *const CmuxChromiumPopupRequestNotification = @"CmuxChromiumPopupRequestNotification";
 static NSString *const CmuxChromiumDownloadEventNotification = @"CmuxChromiumDownloadEventNotification";
 static NSString *const CmuxChromiumFaviconURLsNotification = @"CmuxChromiumFaviconURLsNotification";
+static NSString *const CmuxChromiumFindResultNotification = @"CmuxChromiumFindResultNotification";
 static BOOL g_initialized = NO;
 static NSTimer *g_scheduled_message_loop_timer = nil;
 static BOOL g_message_loop_working = NO;
@@ -127,6 +129,7 @@ typedef struct {
     cef_load_handler_t load_handler;
     cef_download_handler_t download_handler;
     cef_permission_handler_t permission_handler;
+    cef_find_handler_t find_handler;
     struct cmux_chromium_browser_t *browser_handle;
 } cmux_chromium_client_t;
 
@@ -312,6 +315,11 @@ static cef_download_handler_t *CEF_CALLBACK GetDownloadHandler(cef_client_t *sel
 static cef_permission_handler_t *CEF_CALLBACK GetPermissionHandler(cef_client_t *self) {
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)self;
     return &client->permission_handler;
+}
+
+static cef_find_handler_t *CEF_CALLBACK GetFindHandler(cef_client_t *self) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)self;
+    return &client->find_handler;
 }
 
 static void CEF_CALLBACK OnBeforeClose(cef_life_span_handler_t *self, cef_browser_t *browser) {
@@ -607,6 +615,30 @@ static void CEF_CALLBACK OnDismissPermissionPrompt(
 ) {
 }
 
+static void CEF_CALLBACK OnFindResult(
+    cef_find_handler_t *self,
+    cef_browser_t *browser,
+    int identifier,
+    int count,
+    const cef_rect_t *selectionRect,
+    int activeMatchOrdinal,
+    int finalUpdate
+) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, find_handler));
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!client->browser_handle) return;
+        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumFindResultNotification
+                                                          object:nil
+                                                        userInfo:@{
+                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"identifier": @(identifier),
+                                                            @"count": @(count),
+                                                            @"activeMatchOrdinal": @(activeMatchOrdinal),
+                                                            @"finalUpdate": @(finalUpdate ? YES : NO)
+                                                        }];
+    });
+}
+
 static void CEF_CALLBACK OnAfterCreated(cef_life_span_handler_t *self, cef_browser_t *browser) {
     browser->base.release(&browser->base);
 }
@@ -634,11 +666,13 @@ static cmux_chromium_client_t *CreateClient(void) {
     InitBase(&client->load_handler.base, sizeof(cef_load_handler_t));
     InitBase(&client->download_handler.base, sizeof(cef_download_handler_t));
     InitBase(&client->permission_handler.base, sizeof(cef_permission_handler_t));
+    InitBase(&client->find_handler.base, sizeof(cef_find_handler_t));
     client->client.get_life_span_handler = GetLifeSpanHandler;
     client->client.get_display_handler = GetDisplayHandler;
     client->client.get_load_handler = GetLoadHandler;
     client->client.get_download_handler = GetDownloadHandler;
     client->client.get_permission_handler = GetPermissionHandler;
+    client->client.get_find_handler = GetFindHandler;
     client->life_span_handler.on_after_created = OnAfterCreated;
     client->life_span_handler.do_close = DoClose;
     client->life_span_handler.on_before_popup = OnBeforePopup;
@@ -655,6 +689,7 @@ static cmux_chromium_client_t *CreateClient(void) {
     client->permission_handler.on_request_media_access_permission = OnRequestMediaAccessPermission;
     client->permission_handler.on_show_permission_prompt = OnShowPermissionPrompt;
     client->permission_handler.on_dismiss_permission_prompt = OnDismissPermissionPrompt;
+    client->find_handler.on_find_result = OnFindResult;
     return client;
 }
 
@@ -914,6 +949,27 @@ void cmux_chromium_set_zoom_level(void *browserHandle, double zoomLevel) {
     cef_browser_host_t *host = handle->browser->get_host(handle->browser);
     if (!host) return;
     host->set_zoom_level(host, zoomLevel);
+    host->base.release(&host->base);
+}
+
+void cmux_chromium_find(void *browserHandle, const char *searchText, BOOL forward, BOOL findNext) {
+    cmux_chromium_browser_t *handle = (cmux_chromium_browser_t *)browserHandle;
+    if (!handle || !handle->browser) return;
+    cef_browser_host_t *host = handle->browser->get_host(handle->browser);
+    if (!host) return;
+    cef_string_t cef_search_text = {};
+    cef_string_from_utf8(searchText ?: "", strlen(searchText ?: ""), &cef_search_text);
+    host->find(host, &cef_search_text, forward ? 1 : 0, 0, findNext ? 1 : 0);
+    cef_string_clear(&cef_search_text);
+    host->base.release(&host->base);
+}
+
+void cmux_chromium_stop_finding(void *browserHandle, BOOL clearSelection) {
+    cmux_chromium_browser_t *handle = (cmux_chromium_browser_t *)browserHandle;
+    if (!handle || !handle->browser) return;
+    cef_browser_host_t *host = handle->browser->get_host(handle->browser);
+    if (!host) return;
+    host->stop_finding(host, clearSelection ? 1 : 0);
     host->base.release(&host->base);
 }
 

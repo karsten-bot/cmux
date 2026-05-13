@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import SwiftUI
 
 struct ChromiumNavigationState {
     let url: URL?
@@ -92,6 +93,8 @@ final class ChromiumBrowserHostView: NSView {
     private var devToolsVisible = false
     private var isDraggingDevToolsDivider = false
     private var devToolsWidth: CGFloat = ChromiumBrowserHostView.initialDevToolsWidth()
+    private var searchOverlayHostingView: NSHostingView<BrowserSearchOverlay>?
+    private var searchOverlayFocusGeneration: UInt64?
     private var pageZoomFactor: CGFloat = 1.0
     private let devToolsPreferredWidth: CGFloat = 520
     private let devToolsMinimumWidth: CGFloat = 360
@@ -104,11 +107,13 @@ final class ChromiumBrowserHostView: NSView {
     private static let popupRequestNotification = Notification.Name("CmuxChromiumPopupRequestNotification")
     private static let downloadEventNotification = Notification.Name("CmuxChromiumDownloadEventNotification")
     private static let faviconURLsNotification = Notification.Name("CmuxChromiumFaviconURLsNotification")
+    private static let findResultNotification = Notification.Name("CmuxChromiumFindResultNotification")
     var onReactGrabMessage: (([String: Any]) -> Void)?
     var onNavigationStateChanged: ((ChromiumNavigationState) -> Void)?
     var onPopupRequest: ((URL) -> Void)?
     var onDownloadEvent: (([String: Any]) -> Void)?
     var onFaviconURLsChanged: (([URL]) -> Void)?
+    var onFindResult: ((Int, Int) -> Void)?
 
     init(initialURL: URL?) {
         pendingURL = initialURL
@@ -165,6 +170,9 @@ final class ChromiumBrowserHostView: NSView {
     override func layout() {
         super.layout()
         layoutChromiumSubviews()
+        if let searchOverlayHostingView {
+            moveSearchOverlayToFront(searchOverlayHostingView)
+        }
         if let browserHandle {
             cmux_chromium_resize_browser(browserHandle)
             if let devToolsBrowserHandle {
@@ -320,6 +328,70 @@ final class ChromiumBrowserHostView: NSView {
         pageZoomFactor = factor
         guard let browserHandle else { return }
         cmux_chromium_set_zoom_level(browserHandle, Self.chromiumZoomLevel(for: factor))
+    }
+
+    func find(_ searchText: String, forward: Bool, findNext: Bool) {
+        guard let browserHandle else { return }
+        searchText.withCString { text in
+            cmux_chromium_find(browserHandle, text, forward, findNext)
+        }
+    }
+
+    func stopFinding(clearSelection: Bool) {
+        guard let browserHandle else { return }
+        cmux_chromium_stop_finding(browserHandle, clearSelection)
+    }
+
+    func setSearchOverlay(_ configuration: BrowserPortalSearchOverlayConfiguration?) {
+        guard let configuration else {
+            searchOverlayHostingView?.removeFromSuperview()
+            searchOverlayHostingView = nil
+            searchOverlayFocusGeneration = nil
+            return
+        }
+
+        let rootView = BrowserSearchOverlay(
+            panelId: configuration.panelId,
+            searchState: configuration.searchState,
+            focusRequestGeneration: configuration.focusRequestGeneration,
+            canApplyFocusRequest: configuration.canApplyFocusRequest,
+            onNext: configuration.onNext,
+            onPrevious: configuration.onPrevious,
+            onClose: configuration.onClose,
+            onFieldDidFocus: configuration.onFieldDidFocus
+        )
+
+        if let overlay = searchOverlayHostingView {
+            overlay.rootView = rootView
+            moveSearchOverlayToFront(overlay)
+        } else {
+            let overlay = NSHostingView(rootView: rootView)
+            overlay.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(overlay)
+            NSLayoutConstraint.activate([
+                overlay.topAnchor.constraint(equalTo: topAnchor),
+                overlay.bottomAnchor.constraint(equalTo: bottomAnchor),
+                overlay.leadingAnchor.constraint(equalTo: leadingAnchor),
+                overlay.trailingAnchor.constraint(equalTo: trailingAnchor),
+            ])
+            searchOverlayHostingView = overlay
+        }
+
+        if searchOverlayFocusGeneration != configuration.focusRequestGeneration {
+            searchOverlayFocusGeneration = configuration.focusRequestGeneration
+            DispatchQueue.main.async {
+                self.postSearchOverlayFocus(configuration)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                self.postSearchOverlayFocus(configuration)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                self.postSearchOverlayFocus(configuration)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.postSearchOverlayFocus(configuration)
+            }
+        }
     }
 
     func showDeveloperTools() -> Bool {
@@ -544,6 +616,41 @@ final class ChromiumBrowserHostView: NSView {
         log(Double(max(0.25, factor))) / log(1.2)
     }
 
+    private func postSearchOverlayFocus(_ configuration: BrowserPortalSearchOverlayConfiguration) {
+        guard configuration.canApplyFocusRequest(configuration.focusRequestGeneration) else { return }
+        NotificationCenter.default.post(
+            name: .browserSearchFocus,
+            object: configuration.panelId,
+            userInfo: [FindFocusNotificationKey.selectAll: false]
+        )
+        focusSearchOverlayField()
+    }
+
+    private func moveSearchOverlayToFront(_ overlay: NSView) {
+        guard overlay.superview === self else { return }
+        addSubview(overlay, positioned: .above, relativeTo: nil)
+    }
+
+    private func focusSearchOverlayField() {
+        guard let field = searchOverlayTextField(in: searchOverlayHostingView),
+              let window = field.window else { return }
+        _ = window.makeFirstResponder(field)
+    }
+
+    private func searchOverlayTextField(in view: NSView?) -> NSTextField? {
+        guard let view else { return nil }
+        if let field = view as? NSTextField,
+           field.accessibilityIdentifier() == "BrowserFindSearchTextField" {
+            return field
+        }
+        for subview in view.subviews {
+            if let field = searchOverlayTextField(in: subview) {
+                return field
+            }
+        }
+        return nil
+    }
+
     private func ensureBrowserCreated() {
         guard browserHandle == nil, window != nil else { return }
         guard bounds.width > 1, bounds.height > 1 else { return }
@@ -602,6 +709,12 @@ final class ChromiumBrowserHostView: NSView {
                     name: Self.faviconURLsNotification,
                     object: nil
                 )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleFindResultNotification(_:)),
+                    name: Self.findResultNotification,
+                    object: nil
+                )
             }
             pendingJavaScript.forEach { cmux_chromium_execute_javascript(browserHandle, $0) }
             pendingJavaScript.removeAll()
@@ -656,6 +769,17 @@ final class ChromiumBrowserHostView: NSView {
         }
         let urls = rawURLs.compactMap(URL.init(string:))
         onFaviconURLsChanged?(urls)
+    }
+
+    @objc private func handleFindResultNotification(_ notification: Notification) {
+        guard let browserHandle,
+              let notifiedBrowserHandle = notification.userInfo?["browserHandle"] as? NSValue,
+              notifiedBrowserHandle.pointerValue == browserHandle,
+              let count = notification.userInfo?["count"] as? Int,
+              let activeMatchOrdinal = notification.userInfo?["activeMatchOrdinal"] as? Int else {
+            return
+        }
+        onFindResult?(count, activeMatchOrdinal)
     }
 
     @objc private func handleNavigationStateNotification(_ notification: Notification) {

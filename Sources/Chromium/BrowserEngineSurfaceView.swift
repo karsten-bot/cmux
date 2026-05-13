@@ -18,7 +18,8 @@ struct BrowserEngineSurfaceView: View {
             ChromiumViewRepresentable(
                 panel: panel,
                 shouldFocusWebView: shouldFocusWebView,
-                isPanelFocused: isPanelFocused
+                isPanelFocused: isPanelFocused,
+                searchOverlay: searchOverlay
             )
         } else {
             WebViewRepresentable(

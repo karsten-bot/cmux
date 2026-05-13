@@ -23,6 +23,9 @@ extension BrowserPanel {
             chromiumHostView.onFaviconURLsChanged = { [weak self] urls in
                 self?.refreshChromiumFavicon(from: urls)
             }
+            chromiumHostView.onFindResult = { [weak self] count, activeMatchOrdinal in
+                self?.applyChromiumFindResult(count: count, activeMatchOrdinal: activeMatchOrdinal)
+            }
             return chromiumHostView
         }
         let view = ChromiumBrowserHostView(initialURL: currentURL)
@@ -41,6 +44,9 @@ extension BrowserPanel {
         }
         view.onFaviconURLsChanged = { [weak self] urls in
             self?.refreshChromiumFavicon(from: urls)
+        }
+        view.onFindResult = { [weak self] count, activeMatchOrdinal in
+            self?.applyChromiumFindResult(count: count, activeMatchOrdinal: activeMatchOrdinal)
         }
         chromiumHostView = view
         return view
