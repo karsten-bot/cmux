@@ -10,6 +10,7 @@ BOOL cmux_chromium_runtime_available(void);
 BOOL cmux_chromium_initialize(void);
 int cmux_chromium_remote_debugging_port(void);
 const char *cmux_chromium_last_error(void);
+void cmux_chromium_pump_message_loop(void);
 void * _Nullable cmux_chromium_create_browser(NSView *parentView, const char *url);
 void cmux_chromium_close_browser(void *browserHandle);
 void cmux_chromium_dispose_browser(void *browserHandle);

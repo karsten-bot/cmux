@@ -985,6 +985,10 @@ final class ChromiumBrowserHostView: NSView {
         return try decodeDevToolsEvaluationResult(object)
     }
 
+    static func pumpMessageLoopForRemoteDebugging() {
+        cmux_chromium_pump_message_loop()
+    }
+
     private nonisolated static func inspectElementWithRemoteDebuggingSync(
         x: Int,
         y: Int,

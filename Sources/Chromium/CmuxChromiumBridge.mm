@@ -1677,6 +1677,10 @@ const char *cmux_chromium_last_error(void) {
     return g_last_error.c_str();
 }
 
+void cmux_chromium_pump_message_loop(void) {
+    CmuxDoMessageLoopWork();
+}
+
 int cmux_chromium_remote_debugging_port(void) {
     return CmuxChromiumRemoteDebuggingPortValue();
 }

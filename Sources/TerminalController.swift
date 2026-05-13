@@ -9002,6 +9002,7 @@ class TerminalController {
                 let isComplete = rawResult != nil
                 resultLock.unlock()
                 if isComplete { break }
+                ChromiumBrowserHostView.pumpMessageLoopForRemoteDebugging()
                 RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
             }
         } else {
