@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <algorithm>
+#include <atomic>
 #include <string>
 #include <string.h>
 #include <vector>
@@ -181,6 +182,14 @@ typedef struct cmux_chromium_browser_t {
     BOOL is_closing;
     BOOL dispose_when_closed;
 } cmux_chromium_browser_t;
+
+typedef struct cmux_chromium_navigation_entry_visitor_t {
+    cef_navigation_entry_visitor_t visitor;
+    std::atomic<int> ref_count;
+    cmux_chromium_client_t *client;
+    std::vector<std::string> urls;
+    int current_index;
+} cmux_chromium_navigation_entry_visitor_t;
 
 static cmux_chromium_browser_t *CreateBrowserHandle(void) {
     return new cmux_chromium_browser_t();
@@ -356,6 +365,30 @@ static void InitBase(cef_base_ref_counted_t *base, size_t size) {
     base->release = NoopRelease;
     base->has_one_ref = NoopHasOneRef;
     base->has_at_least_one_ref = NoopHasAtLeastOneRef;
+}
+
+static void CEF_CALLBACK NavigationEntryVisitorAddRef(cef_base_ref_counted_t *base) {
+    auto *visitor = (cmux_chromium_navigation_entry_visitor_t *)((char *)base - offsetof(cmux_chromium_navigation_entry_visitor_t, visitor));
+    visitor->ref_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+static int CEF_CALLBACK NavigationEntryVisitorRelease(cef_base_ref_counted_t *base) {
+    auto *visitor = (cmux_chromium_navigation_entry_visitor_t *)((char *)base - offsetof(cmux_chromium_navigation_entry_visitor_t, visitor));
+    if (visitor->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        delete visitor;
+        return 1;
+    }
+    return 0;
+}
+
+static int CEF_CALLBACK NavigationEntryVisitorHasOneRef(cef_base_ref_counted_t *base) {
+    auto *visitor = (cmux_chromium_navigation_entry_visitor_t *)((char *)base - offsetof(cmux_chromium_navigation_entry_visitor_t, visitor));
+    return visitor->ref_count.load(std::memory_order_acquire) == 1 ? 1 : 0;
+}
+
+static int CEF_CALLBACK NavigationEntryVisitorHasAtLeastOneRef(cef_base_ref_counted_t *base) {
+    auto *visitor = (cmux_chromium_navigation_entry_visitor_t *)((char *)base - offsetof(cmux_chromium_navigation_entry_visitor_t, visitor));
+    return visitor->ref_count.load(std::memory_order_acquire) > 0 ? 1 : 0;
 }
 
 static cmux_chromium_client_t *CreateClient(void);
@@ -964,6 +997,88 @@ static void PostNavigationState(cmux_chromium_client_t *client, cef_browser_t *b
     });
 }
 
+static NSString *CmuxChromiumNavigationEntryURL(cef_navigation_entry_t *entry) {
+    if (!entry || !entry->is_valid(entry)) return @"";
+    NSString *displayURL = NSStringFromCefUserFreeString(entry->get_display_url(entry));
+    if (displayURL.length > 0) return displayURL;
+    return NSStringFromCefUserFreeString(entry->get_url(entry));
+}
+
+static NSArray<NSString *> *CmuxChromiumNavigationEntryStrings(const std::vector<std::string> &urls, size_t start, size_t end) {
+    NSMutableArray<NSString *> *result = [NSMutableArray array];
+    for (size_t index = start; index < end; index++) {
+        NSString *url = [NSString stringWithUTF8String:urls[index].c_str()];
+        if (url.length > 0) {
+            [result addObject:url];
+        }
+    }
+    return result;
+}
+
+static void CmuxChromiumPostNavigationEntries(cmux_chromium_navigation_entry_visitor_t *visitor) {
+    if (!visitor || !visitor->client || !visitor->client->browser_handle) return;
+    int currentIndex = visitor->current_index;
+    size_t count = visitor->urls.size();
+    NSArray<NSString *> *backHistoryURLStrings = @[];
+    NSArray<NSString *> *forwardHistoryURLStrings = @[];
+    if (currentIndex >= 0 && (size_t)currentIndex < count) {
+        backHistoryURLStrings = CmuxChromiumNavigationEntryStrings(visitor->urls, 0, (size_t)currentIndex);
+        forwardHistoryURLStrings = CmuxChromiumNavigationEntryStrings(visitor->urls, (size_t)currentIndex + 1, count);
+    }
+
+    NSValue *browserHandle = [NSValue valueWithPointer:visitor->client->browser_handle];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumNavigationStateNotification
+                                                          object:nil
+                                                        userInfo:@{
+                                                            @"browserHandle": browserHandle,
+                                                            @"backHistoryURLStrings": backHistoryURLStrings,
+                                                            @"forwardHistoryURLStrings": forwardHistoryURLStrings,
+                                                        }];
+    });
+}
+
+static int CEF_CALLBACK VisitNavigationEntry(
+    cef_navigation_entry_visitor_t *self,
+    cef_navigation_entry_t *entry,
+    int current,
+    int index,
+    int total
+) {
+    auto *visitor = (cmux_chromium_navigation_entry_visitor_t *)self;
+    NSString *url = CmuxChromiumNavigationEntryURL(entry);
+    visitor->urls.push_back(url.UTF8String ?: "");
+    if (current) {
+        visitor->current_index = index;
+    }
+    if (index + 1 >= total) {
+        CmuxChromiumPostNavigationEntries(visitor);
+    }
+    return 1;
+}
+
+static void CmuxChromiumRefreshNavigationEntries(cmux_chromium_client_t *client, cef_browser_t *browser) {
+    if (!client || !client->browser_handle || !browser) return;
+    cef_browser_host_t *host = browser->get_host(browser);
+    if (!host) return;
+
+    auto *visitor = new cmux_chromium_navigation_entry_visitor_t();
+    memset(&visitor->visitor, 0, sizeof(cef_navigation_entry_visitor_t));
+    visitor->visitor.base.size = sizeof(cef_navigation_entry_visitor_t);
+    visitor->visitor.base.add_ref = NavigationEntryVisitorAddRef;
+    visitor->visitor.base.release = NavigationEntryVisitorRelease;
+    visitor->visitor.base.has_one_ref = NavigationEntryVisitorHasOneRef;
+    visitor->visitor.base.has_at_least_one_ref = NavigationEntryVisitorHasAtLeastOneRef;
+    visitor->visitor.visit = VisitNavigationEntry;
+    visitor->ref_count.store(1, std::memory_order_relaxed);
+    visitor->client = client;
+    visitor->current_index = -1;
+
+    host->get_navigation_entries(host, &visitor->visitor, 0);
+    visitor->visitor.base.release(&visitor->visitor.base);
+    host->base.release(&host->base);
+}
+
 static void CEF_CALLBACK OnAddressChange(
     cef_display_handler_t *self,
     cef_browser_t *browser,
@@ -973,6 +1088,7 @@ static void CEF_CALLBACK OnAddressChange(
     if (frame && !frame->is_main(frame)) return;
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, display_handler));
     PostNavigationState(client, browser, @{ @"url": NSStringFromCefString(url) });
+    CmuxChromiumRefreshNavigationEntries(client, browser);
     [client->popup_controller updateURL:NSStringFromCefString(url)];
 }
 
@@ -1037,6 +1153,9 @@ static void CEF_CALLBACK OnLoadingStateChange(
         @"canGoBack": @(can_go_back ? YES : NO),
         @"canGoForward": @(can_go_forward ? YES : NO)
     });
+    if (!is_loading) {
+        CmuxChromiumRefreshNavigationEntries(client, browser);
+    }
 }
 
 static int CEF_CALLBACK CanDownload(
@@ -1489,6 +1608,12 @@ void cmux_chromium_go_back(void *browserHandle) {
 
 void cmux_chromium_go_forward(void *browserHandle) {
     WithBrowser(browserHandle, ^(cef_browser_t *browser) { if (browser->can_go_forward(browser)) browser->go_forward(browser); });
+}
+
+void cmux_chromium_refresh_navigation_entries(void *browserHandle) {
+    cmux_chromium_browser_t *handle = (cmux_chromium_browser_t *)browserHandle;
+    if (!handle || !handle->browser || !handle->client) return;
+    CmuxChromiumRefreshNavigationEntries(handle->client, handle->browser);
 }
 
 void cmux_chromium_reload(void *browserHandle) {

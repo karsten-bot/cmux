@@ -18,6 +18,7 @@ void cmux_chromium_load_url(void *browserHandle, const char *url);
 void cmux_chromium_execute_javascript(void *browserHandle, const char *script);
 void cmux_chromium_go_back(void *browserHandle);
 void cmux_chromium_go_forward(void *browserHandle);
+void cmux_chromium_refresh_navigation_entries(void *browserHandle);
 void cmux_chromium_reload(void *browserHandle);
 void cmux_chromium_stop_loading(void *browserHandle);
 void cmux_chromium_set_focus(void *browserHandle, BOOL focus);

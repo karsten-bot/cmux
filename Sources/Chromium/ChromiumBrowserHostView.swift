@@ -7,8 +7,10 @@ struct ChromiumNavigationState {
     let title: String?
     let isLoading: Bool?
     let isFullscreen: Bool?
-    let canGoBack: Bool
-    let canGoForward: Bool
+    let canGoBack: Bool?
+    let canGoForward: Bool?
+    let backHistoryURLStrings: [String]?
+    let forwardHistoryURLStrings: [String]?
 }
 
 struct ChromiumJavaScriptError: LocalizedError {
@@ -262,6 +264,11 @@ final class ChromiumBrowserHostView: NSView {
     func goForward() {
         guard let browserHandle else { return }
         cmux_chromium_go_forward(browserHandle)
+    }
+
+    func refreshNavigationEntries() {
+        guard let browserHandle else { return }
+        cmux_chromium_refresh_navigation_entries(browserHandle)
     }
 
     func reload() {
@@ -867,8 +874,10 @@ final class ChromiumBrowserHostView: NSView {
         let title = notification.userInfo?["title"] as? String
         let isLoading = notification.userInfo?["isLoading"] as? Bool
         let isFullscreen = notification.userInfo?["isFullscreen"] as? Bool
-        let canGoBack = (notification.userInfo?["canGoBack"] as? Bool) ?? false
-        let canGoForward = (notification.userInfo?["canGoForward"] as? Bool) ?? false
+        let canGoBack = notification.userInfo?["canGoBack"] as? Bool
+        let canGoForward = notification.userInfo?["canGoForward"] as? Bool
+        let backHistoryURLStrings = notification.userInfo?["backHistoryURLStrings"] as? [String]
+        let forwardHistoryURLStrings = notification.userInfo?["forwardHistoryURLStrings"] as? [String]
         onNavigationStateChanged?(
             ChromiumNavigationState(
                 url: url,
@@ -876,7 +885,9 @@ final class ChromiumBrowserHostView: NSView {
                 isLoading: isLoading,
                 isFullscreen: isFullscreen,
                 canGoBack: canGoBack,
-                canGoForward: canGoForward
+                canGoForward: canGoForward,
+                backHistoryURLStrings: backHistoryURLStrings,
+                forwardHistoryURLStrings: forwardHistoryURLStrings
             )
         )
     }
