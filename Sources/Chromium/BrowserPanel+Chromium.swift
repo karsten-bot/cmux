@@ -14,6 +14,12 @@ extension BrowserPanel {
             chromiumHostView.onNavigationStateChanged = { [weak self] state in
                 self?.applyChromiumNavigationState(state)
             }
+            chromiumHostView.onPopupRequest = { [weak self] url in
+                self?.openLinkInNewTab(url: url)
+            }
+            chromiumHostView.onDownloadEvent = { [weak self] event in
+                self?.handleChromiumDownloadEvent(event)
+            }
             return chromiumHostView
         }
         let view = ChromiumBrowserHostView(initialURL: currentURL)
@@ -23,6 +29,12 @@ extension BrowserPanel {
         }
         view.onNavigationStateChanged = { [weak self] state in
             self?.applyChromiumNavigationState(state)
+        }
+        view.onPopupRequest = { [weak self] url in
+            self?.openLinkInNewTab(url: url)
+        }
+        view.onDownloadEvent = { [weak self] event in
+            self?.handleChromiumDownloadEvent(event)
         }
         chromiumHostView = view
         return view

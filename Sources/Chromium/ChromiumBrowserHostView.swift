@@ -5,8 +5,15 @@ struct ChromiumNavigationState {
     let url: URL?
     let title: String?
     let isLoading: Bool?
+    let isFullscreen: Bool?
     let canGoBack: Bool
     let canGoForward: Bool
+}
+
+struct ChromiumJavaScriptError: LocalizedError {
+    let message: String
+
+    var errorDescription: String? { message }
 }
 
 @MainActor
@@ -73,6 +80,7 @@ final class ChromiumBrowserHostView: NSView {
     private var browserHandle: UnsafeMutableRawPointer?
     private var devToolsBrowserHandle: UnsafeMutableRawPointer?
     private var pendingURL: URL?
+    private var currentURL: URL?
     private var devToolsOpenTask: Task<Void, Never>?
     private var devToolsDividerEventMonitor: Any?
     private var devToolsDividerTrackingArea: NSTrackingArea?
@@ -84,6 +92,7 @@ final class ChromiumBrowserHostView: NSView {
     private var devToolsVisible = false
     private var isDraggingDevToolsDivider = false
     private var devToolsWidth: CGFloat = ChromiumBrowserHostView.initialDevToolsWidth()
+    private var pageZoomFactor: CGFloat = 1.0
     private let devToolsPreferredWidth: CGFloat = 520
     private let devToolsMinimumWidth: CGFloat = 360
     private let devToolsMinimumPageWidth: CGFloat = 160
@@ -92,11 +101,16 @@ final class ChromiumBrowserHostView: NSView {
     private static let reactGrabMessageNotification = Notification.Name("CmuxChromiumReactGrabMessageNotification")
     private static let navigationStateNotification = Notification.Name("CmuxChromiumNavigationStateNotification")
     private static let browserClosedNotification = Notification.Name("CmuxChromiumBrowserClosedNotification")
+    private static let popupRequestNotification = Notification.Name("CmuxChromiumPopupRequestNotification")
+    private static let downloadEventNotification = Notification.Name("CmuxChromiumDownloadEventNotification")
     var onReactGrabMessage: (([String: Any]) -> Void)?
     var onNavigationStateChanged: ((ChromiumNavigationState) -> Void)?
+    var onPopupRequest: ((URL) -> Void)?
+    var onDownloadEvent: (([String: Any]) -> Void)?
 
     init(initialURL: URL?) {
         pendingURL = initialURL
+        currentURL = initialURL
         super.init(frame: .zero)
         autoresizingMask = [.width, .height]
         wantsLayer = true
@@ -271,6 +285,39 @@ final class ChromiumBrowserHostView: NSView {
             return
         }
         cmux_chromium_execute_javascript(browserHandle, script)
+    }
+
+    func evaluateJavaScript(_ script: String, timeout: TimeInterval = 5.0) async throws -> Any? {
+        if browserHandle == nil {
+            ensureBrowserCreated()
+            if browserHandle == nil {
+                throw ChromiumJavaScriptError(message: String(cString: cmux_chromium_last_error()))
+            }
+        }
+
+        let pageURL = currentURL ?? pendingURL
+        return try await Task.detached {
+            try Self.evaluateJavaScriptWithRemoteDebuggingSync(script, pageURL: pageURL, timeout: timeout)
+        }.value
+    }
+
+    func takeSnapshot() -> NSImage? {
+        let targetView = pageContainerView
+        guard targetView.bounds.width > 0,
+              targetView.bounds.height > 0,
+              let representation = targetView.bitmapImageRepForCachingDisplay(in: targetView.bounds) else {
+            return nil
+        }
+        targetView.cacheDisplay(in: targetView.bounds, to: representation)
+        let image = NSImage(size: targetView.bounds.size)
+        image.addRepresentation(representation)
+        return image
+    }
+
+    func setPageZoomFactor(_ factor: CGFloat) {
+        pageZoomFactor = factor
+        guard let browserHandle else { return }
+        cmux_chromium_set_zoom_level(browserHandle, Self.chromiumZoomLevel(for: factor))
     }
 
     func showDeveloperTools() -> Bool {
@@ -483,6 +530,18 @@ final class ChromiumBrowserHostView: NSView {
         defaults.set(Double(width), forKey: devToolsWidthDefaultsKey)
     }
 
+    private nonisolated static func jsonLiteral(_ value: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]),
+              let literal = String(data: data, encoding: .utf8) else {
+            return "\"\""
+        }
+        return literal
+    }
+
+    private static func chromiumZoomLevel(for factor: CGFloat) -> Double {
+        log(Double(max(0.25, factor))) / log(1.2)
+    }
+
     private func ensureBrowserCreated() {
         guard browserHandle == nil, window != nil else { return }
         guard bounds.width > 1, bounds.height > 1 else { return }
@@ -502,6 +561,7 @@ final class ChromiumBrowserHostView: NSView {
             cmuxDebugLog("browser.chromium.create.failed \(message)")
             #endif
         } else if let browserHandle {
+            cmux_chromium_set_zoom_level(browserHandle, Self.chromiumZoomLevel(for: pageZoomFactor))
             if !isObservingBrowserNotifications {
                 NotificationCenter.default.addObserver(
                     self,
@@ -520,6 +580,18 @@ final class ChromiumBrowserHostView: NSView {
                     self,
                     selector: #selector(handleBrowserClosedNotification(_:)),
                     name: Self.browserClosedNotification,
+                    object: nil
+                )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handlePopupRequestNotification(_:)),
+                    name: Self.popupRequestNotification,
+                    object: nil
+                )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleDownloadEventNotification(_:)),
+                    name: Self.downloadEventNotification,
                     object: nil
                 )
             }
@@ -544,6 +616,29 @@ final class ChromiumBrowserHostView: NSView {
         }
     }
 
+    @objc private func handlePopupRequestNotification(_ notification: Notification) {
+        guard let browserHandle,
+              let notifiedBrowserHandle = notification.userInfo?["browserHandle"] as? NSValue,
+              notifiedBrowserHandle.pointerValue == browserHandle,
+              let rawURL = notification.userInfo?["url"] as? String,
+              let url = URL(string: rawURL) else {
+            return
+        }
+        onPopupRequest?(url)
+    }
+
+    @objc private func handleDownloadEventNotification(_ notification: Notification) {
+        guard let browserHandle,
+              let notifiedBrowserHandle = notification.userInfo?["browserHandle"] as? NSValue,
+              notifiedBrowserHandle.pointerValue == browserHandle else {
+            return
+        }
+        let event = Dictionary(uniqueKeysWithValues: (notification.userInfo ?? [:]).compactMap { key, value in
+            (key as? String).map { ($0, value) }
+        })
+        onDownloadEvent?(event)
+    }
+
     @objc private func handleNavigationStateNotification(_ notification: Notification) {
         guard let browserHandle,
               let notifiedBrowserHandle = notification.userInfo?["browserHandle"] as? NSValue,
@@ -553,8 +648,12 @@ final class ChromiumBrowserHostView: NSView {
 
         let rawURL = notification.userInfo?["url"] as? String
         let url = rawURL.flatMap(URL.init(string:))
+        if let url {
+            currentURL = url
+        }
         let title = notification.userInfo?["title"] as? String
         let isLoading = notification.userInfo?["isLoading"] as? Bool
+        let isFullscreen = notification.userInfo?["isFullscreen"] as? Bool
         let canGoBack = (notification.userInfo?["canGoBack"] as? Bool) ?? false
         let canGoForward = (notification.userInfo?["canGoForward"] as? Bool) ?? false
         onNavigationStateChanged?(
@@ -562,6 +661,7 @@ final class ChromiumBrowserHostView: NSView {
                 url: url,
                 title: title,
                 isLoading: isLoading,
+                isFullscreen: isFullscreen,
                 canGoBack: canGoBack,
                 canGoForward: canGoForward
             )
@@ -614,12 +714,111 @@ final class ChromiumBrowserHostView: NSView {
         let webSocketDebuggerUrl: String?
     }
 
+    private nonisolated static func decodeDevToolsEvaluationResult(_ object: [String: Any]) throws -> Any? {
+        if let error = object["error"] as? [String: Any],
+           let message = error["message"] as? String {
+            throw ChromiumJavaScriptError(message: message)
+        }
+        let result = object["result"] as? [String: Any]
+        if let exception = result?["exceptionDetails"] as? [String: Any] {
+            let text = (exception["text"] as? String) ?? "Chromium JavaScript failed."
+            throw ChromiumJavaScriptError(message: text)
+        }
+        guard let remoteObject = result?["result"] as? [String: Any] else { return nil }
+        if (remoteObject["type"] as? String) == "undefined" {
+            return nil
+        }
+        if let value = remoteObject["value"] {
+            return value is NSNull ? nil : value
+        }
+        if let value = remoteObject["unserializableValue"] as? String {
+            return value
+        }
+        return remoteObject["description"] as? String
+    }
+
+    nonisolated static func evaluateJavaScriptWithRemoteDebuggingSync(
+        _ script: String,
+        pageURL: URL?,
+        timeout: TimeInterval
+    ) throws -> Any? {
+        guard let webSocketURL = resolveDevToolsWebSocketURLSync(for: pageURL) else {
+            throw ChromiumJavaScriptError(message: "Chromium DevTools target was not available.")
+        }
+
+        let expressionLiteral = jsonLiteral(script)
+        let message = """
+        {"id":1,"method":"Runtime.evaluate","params":{"expression":\(expressionLiteral),"awaitPromise":true,"returnByValue":true}}
+        """
+        let data = try sendDevToolsWebSocketMessageSync(message, to: webSocketURL, timeout: timeout)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["id"] as? Int == 1 else {
+            throw ChromiumJavaScriptError(message: "Chromium DevTools returned an invalid response.")
+        }
+        return try decodeDevToolsEvaluationResult(object)
+    }
+
+    private nonisolated static func sendDevToolsWebSocketMessageSync(_ message: String, to url: URL, timeout: TimeInterval) throws -> Data {
+        let semaphore = DispatchSemaphore(value: 0)
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.webSocketTask(with: url)
+        var result: Result<Data, Error>?
+
+        task.resume()
+        task.send(.string(message)) { error in
+            if let error {
+                result = .failure(error)
+                semaphore.signal()
+                return
+            }
+            task.receive { received in
+                switch received {
+                case .success(.string(let text)):
+                    result = .success(Data(text.utf8))
+                case .success(.data(let data)):
+                    result = .success(data)
+                case .failure(let error):
+                    result = .failure(error)
+                @unknown default:
+                    result = .failure(ChromiumJavaScriptError(message: "Chromium DevTools returned an unsupported WebSocket message."))
+                }
+                semaphore.signal()
+            }
+        }
+
+        guard semaphore.wait(timeout: .now() + max(0.1, timeout)) == .success else {
+            task.cancel(with: .goingAway, reason: nil)
+            session.invalidateAndCancel()
+            throw ChromiumJavaScriptError(message: "Timed out waiting for Chromium JavaScript result.")
+        }
+
+        task.cancel(with: .goingAway, reason: nil)
+        session.invalidateAndCancel()
+        return try result?.get() ?? Data()
+    }
+
+    private nonisolated static func devToolsListEndpoint() -> URL {
+        URL(string: "http://127.0.0.1:\(cmux_chromium_remote_debugging_port())/json/list")!
+    }
+
+    private nonisolated static func resolveDevToolsWebSocketURLSync(for pageURL: URL?) -> URL? {
+        let endpoint = devToolsListEndpoint()
+        for _ in 0..<20 {
+            if let target = targetFromDevToolsSync(endpoint: endpoint, pageURL: pageURL),
+               let webSocketDebuggerUrl = target.webSocketDebuggerUrl,
+               let url = URL(string: webSocketDebuggerUrl) {
+                return url
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return nil
+    }
+
     private static func resolveDevToolsFrontendURL(for pageURL: URL?) async -> URL? {
-        let port = cmux_chromium_remote_debugging_port()
-        let endpoint = URL(string: "http://127.0.0.1:\(port)/json/list")!
+        let endpoint = Self.devToolsListEndpoint()
         for _ in 0..<20 {
             if Task.isCancelled { return nil }
-            if let url = await fetchDevToolsFrontendURL(endpoint: endpoint, pageURL: pageURL, port: port) {
+            if let url = await fetchDevToolsFrontendURL(endpoint: endpoint, pageURL: pageURL) {
                 return url
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -627,12 +826,39 @@ final class ChromiumBrowserHostView: NSView {
         return nil
     }
 
-    private static func fetchDevToolsFrontendURL(endpoint: URL, pageURL: URL?, port: Int32) async -> URL? {
+    private static func fetchDevToolsFrontendURL(endpoint: URL, pageURL: URL?) async -> URL? {
+        guard let target = await targetFromDevTools(endpoint: endpoint, pageURL: pageURL) else { return nil }
+        if let websocket = target.webSocketDebuggerUrl,
+           let range = websocket.range(of: "://") {
+            let wsTarget = String(websocket[range.upperBound...])
+            return URL(string: "http://127.0.0.1:\(cmux_chromium_remote_debugging_port())/devtools/inspector.html?ws=\(wsTarget)")
+        }
+        if let frontend = target.devtoolsFrontendUrl, !frontend.isEmpty {
+            if frontend.hasPrefix("http://") || frontend.hasPrefix("https://") {
+                return URL(string: frontend)
+            }
+            return URL(string: "http://127.0.0.1:\(cmux_chromium_remote_debugging_port())\(frontend)")
+        }
+        return nil
+    }
+
+    private nonisolated static func targetFromDevToolsSync(endpoint: URL, pageURL: URL?) -> DevToolsTarget? {
+        guard let data = try? Data(contentsOf: endpoint),
+              let targets = try? JSONDecoder().decode([DevToolsTarget].self, from: data) else {
+            return nil
+        }
+        return selectDevToolsTarget(from: targets, pageURL: pageURL)
+    }
+
+    private nonisolated static func targetFromDevTools(endpoint: URL, pageURL: URL?) async -> DevToolsTarget? {
         guard let (data, _) = try? await URLSession.shared.data(from: endpoint),
               let targets = try? JSONDecoder().decode([DevToolsTarget].self, from: data) else {
             return nil
         }
+        return selectDevToolsTarget(from: targets, pageURL: pageURL)
+    }
 
+    private nonisolated static func selectDevToolsTarget(from targets: [DevToolsTarget], pageURL: URL?) -> DevToolsTarget? {
         let pageURLString = pageURL?.absoluteString
         let pageTargets = targets.filter { target in
             guard target.type == "page" else { return false }
@@ -645,18 +871,6 @@ final class ChromiumBrowserHostView: NSView {
             return target.url == pageURLString
         } ?? pageTargets.first
 
-        guard let target else { return nil }
-        if let websocket = target.webSocketDebuggerUrl,
-           let range = websocket.range(of: "://") {
-            let wsTarget = String(websocket[range.upperBound...])
-            return URL(string: "http://127.0.0.1:\(port)/devtools/inspector.html?ws=\(wsTarget)")
-        }
-        if let frontend = target.devtoolsFrontendUrl, !frontend.isEmpty {
-            if frontend.hasPrefix("http://") || frontend.hasPrefix("https://") {
-                return URL(string: frontend)
-            }
-            return URL(string: "http://127.0.0.1:\(port)\(frontend)")
-        }
-        return nil
+        return target
     }
 }

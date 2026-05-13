@@ -16,9 +16,11 @@
 #include "include/capi/cef_browser_capi.h"
 #include "include/capi/cef_browser_process_handler_capi.h"
 #include "include/capi/cef_display_handler_capi.h"
+#include "include/capi/cef_download_handler_capi.h"
 #include "include/capi/cef_frame_capi.h"
 #include "include/capi/cef_life_span_handler_capi.h"
 #include "include/capi/cef_load_handler_capi.h"
+#include "include/capi/cef_permission_handler_capi.h"
 #include "include/cef_api_hash.h"
 #include "include/cef_application_mac.h"
 #include "libcef_dll/wrapper/libcef_dll_dylib.cc"
@@ -28,6 +30,8 @@ static NSString *const CmuxChromiumReactGrabMessageNotification = @"CmuxChromium
 static NSString *const CmuxChromiumReactGrabMessagePrefix = @"__CMUX_REACT_GRAB__";
 static NSString *const CmuxChromiumNavigationStateNotification = @"CmuxChromiumNavigationStateNotification";
 static NSString *const CmuxChromiumBrowserClosedNotification = @"CmuxChromiumBrowserClosedNotification";
+static NSString *const CmuxChromiumPopupRequestNotification = @"CmuxChromiumPopupRequestNotification";
+static NSString *const CmuxChromiumDownloadEventNotification = @"CmuxChromiumDownloadEventNotification";
 static BOOL g_initialized = NO;
 static NSTimer *g_scheduled_message_loop_timer = nil;
 static BOOL g_message_loop_working = NO;
@@ -77,6 +81,13 @@ static NSString *NSStringFromCefString(const cef_string_t *value) {
     return [[NSString alloc] initWithCharacters:(const unichar *)value->str length:value->length] ?: @"";
 }
 
+static NSString *NSStringFromCefUserFreeString(cef_string_userfree_t value) {
+    if (!value) return @"";
+    NSString *result = NSStringFromCefString(value);
+    cef_string_userfree_free(value);
+    return result;
+}
+
 @interface NSApplication (CmuxChromiumCefAppProtocol) <CefAppProtocol>
 @end
 
@@ -113,6 +124,8 @@ typedef struct {
     cef_life_span_handler_t life_span_handler;
     cef_display_handler_t display_handler;
     cef_load_handler_t load_handler;
+    cef_download_handler_t download_handler;
+    cef_permission_handler_t permission_handler;
     struct cmux_chromium_browser_t *browser_handle;
 } cmux_chromium_client_t;
 
@@ -290,6 +303,16 @@ static cef_load_handler_t *CEF_CALLBACK GetLoadHandler(cef_client_t *self) {
     return &client->load_handler;
 }
 
+static cef_download_handler_t *CEF_CALLBACK GetDownloadHandler(cef_client_t *self) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)self;
+    return &client->download_handler;
+}
+
+static cef_permission_handler_t *CEF_CALLBACK GetPermissionHandler(cef_client_t *self) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)self;
+    return &client->permission_handler;
+}
+
 static void CEF_CALLBACK OnBeforeClose(cef_life_span_handler_t *self, cef_browser_t *browser) {
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, life_span_handler));
     cmux_chromium_browser_t *handle = client->browser_handle;
@@ -315,6 +338,37 @@ static void CEF_CALLBACK OnBeforeClose(cef_life_span_handler_t *self, cef_browse
     free(client);
 }
 
+static int CEF_CALLBACK OnBeforePopup(
+    cef_life_span_handler_t *self,
+    cef_browser_t *browser,
+    cef_frame_t *frame,
+    int popup_id,
+    const cef_string_t *target_url,
+    const cef_string_t *target_frame_name,
+    cef_window_open_disposition_t target_disposition,
+    int user_gesture,
+    const cef_popup_features_t *popupFeatures,
+    cef_window_info_t *windowInfo,
+    cef_client_t **client,
+    cef_browser_settings_t *settings,
+    cef_dictionary_value_t **extra_info,
+    int *no_javascript_access
+) {
+    if (!browser || !target_url || !target_url->str || target_url->length == 0) return 0;
+    cmux_chromium_client_t *cmux_client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, life_span_handler));
+    NSString *url = NSStringFromCefString(target_url);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!cmux_client->browser_handle) return;
+        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumPopupRequestNotification
+                                                          object:nil
+                                                        userInfo:@{
+                                                            @"browserHandle": [NSValue valueWithPointer:cmux_client->browser_handle],
+                                                            @"url": url
+                                                        }];
+    });
+    return 1;
+}
+
 static int CEF_CALLBACK OnConsoleMessage(
     cef_display_handler_t *self,
     cef_browser_t *browser,
@@ -326,15 +380,19 @@ static int CEF_CALLBACK OnConsoleMessage(
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, display_handler));
     if (!message || !message->str) return 0;
     NSString *text = [[NSString alloc] initWithCharacters:(const unichar *)message->str length:message->length];
-    if (![text hasPrefix:CmuxChromiumReactGrabMessagePrefix]) {
+    NSString *notificationName = nil;
+    NSString *payload = nil;
+    if ([text hasPrefix:CmuxChromiumReactGrabMessagePrefix]) {
+        notificationName = CmuxChromiumReactGrabMessageNotification;
+        payload = [text substringFromIndex:CmuxChromiumReactGrabMessagePrefix.length];
+    } else {
         return 0;
     }
 
-    NSString *payload = [text substringFromIndex:CmuxChromiumReactGrabMessagePrefix.length];
     cmux_chromium_browser_t *browser_handle = client->browser_handle;
     if (!browser_handle) return 0;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumReactGrabMessageNotification
+        [NSNotificationCenter.defaultCenter postNotificationName:notificationName
                                                           object:nil
                                                         userInfo:@{
                                                             @"browserHandle": [NSValue valueWithPointer:browser_handle],
@@ -377,6 +435,15 @@ static void CEF_CALLBACK OnTitleChange(
     PostNavigationState(client, browser, @{ @"title": NSStringFromCefString(title) });
 }
 
+static void CEF_CALLBACK OnFullscreenModeChange(
+    cef_display_handler_t *self,
+    cef_browser_t *browser,
+    int fullscreen
+) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, display_handler));
+    PostNavigationState(client, browser, @{ @"isFullscreen": @(fullscreen ? YES : NO) });
+}
+
 static void CEF_CALLBACK OnLoadingStateChange(
     cef_load_handler_t *self,
     cef_browser_t *browser,
@@ -390,6 +457,124 @@ static void CEF_CALLBACK OnLoadingStateChange(
         @"canGoBack": @(can_go_back ? YES : NO),
         @"canGoForward": @(can_go_forward ? YES : NO)
     });
+}
+
+static int CEF_CALLBACK CanDownload(
+    cef_download_handler_t *self,
+    cef_browser_t *browser,
+    const cef_string_t *url,
+    const cef_string_t *request_method
+) {
+    return 1;
+}
+
+static int CEF_CALLBACK OnBeforeDownload(
+    cef_download_handler_t *self,
+    cef_browser_t *browser,
+    cef_download_item_t *download_item,
+    const cef_string_t *suggested_name,
+    cef_before_download_callback_t *callback
+) {
+    if (!callback) return 0;
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, download_handler));
+    NSString *filename = NSStringFromCefString(suggested_name);
+    uint32_t download_id = download_item && download_item->get_id ? download_item->get_id(download_item) : 0;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!client->browser_handle) return;
+        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumDownloadEventNotification
+                                                          object:nil
+                                                        userInfo:@{
+                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"status": @"started",
+                                                            @"filename": filename,
+                                                            @"id": @(download_id)
+                                                        }];
+    });
+    cef_string_t download_path = {};
+    callback->cont(callback, &download_path, 1);
+    return 1;
+}
+
+static void CEF_CALLBACK OnDownloadUpdated(
+    cef_download_handler_t *self,
+    cef_browser_t *browser,
+    cef_download_item_t *download_item,
+    cef_download_item_callback_t *callback
+) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, download_handler));
+    if (!download_item || !download_item->is_valid || !download_item->is_valid(download_item)) return;
+
+    NSString *status = @"progress";
+    if (download_item->is_complete && download_item->is_complete(download_item)) {
+        status = @"finished";
+    } else if (download_item->is_canceled && download_item->is_canceled(download_item)) {
+        status = @"failed";
+    } else if (download_item->is_interrupted && download_item->is_interrupted(download_item)) {
+        status = @"failed";
+    }
+
+    NSString *filename = download_item->get_suggested_file_name
+        ? NSStringFromCefUserFreeString(download_item->get_suggested_file_name(download_item))
+        : @"";
+    NSString *url = download_item->get_url
+        ? NSStringFromCefUserFreeString(download_item->get_url(download_item))
+        : @"";
+    NSString *path = download_item->get_full_path
+        ? NSStringFromCefUserFreeString(download_item->get_full_path(download_item))
+        : @"";
+    int64_t received_bytes = download_item->get_received_bytes ? download_item->get_received_bytes(download_item) : 0;
+    int64_t total_bytes = download_item->get_total_bytes ? download_item->get_total_bytes(download_item) : 0;
+    uint32_t download_id = download_item->get_id ? download_item->get_id(download_item) : 0;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!client->browser_handle) return;
+        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumDownloadEventNotification
+                                                          object:nil
+                                                        userInfo:@{
+                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"status": status,
+                                                            @"filename": filename,
+                                                            @"url": url,
+                                                            @"path": path,
+                                                            @"receivedBytes": @(received_bytes),
+                                                            @"totalBytes": @(total_bytes),
+                                                            @"id": @(download_id)
+                                                        }];
+    });
+}
+
+static int CEF_CALLBACK OnRequestMediaAccessPermission(
+    cef_permission_handler_t *self,
+    cef_browser_t *browser,
+    cef_frame_t *frame,
+    const cef_string_t *requesting_origin,
+    uint32_t requested_permissions,
+    cef_media_access_callback_t *callback
+) {
+    if (!callback) return 0;
+    callback->cont(callback, requested_permissions);
+    return 1;
+}
+
+static int CEF_CALLBACK OnShowPermissionPrompt(
+    cef_permission_handler_t *self,
+    cef_browser_t *browser,
+    uint64_t prompt_id,
+    const cef_string_t *requesting_origin,
+    uint32_t requested_permissions,
+    cef_permission_prompt_callback_t *callback
+) {
+    if (!callback) return 0;
+    callback->cont(callback, CEF_PERMISSION_RESULT_ACCEPT);
+    return 1;
+}
+
+static void CEF_CALLBACK OnDismissPermissionPrompt(
+    cef_permission_handler_t *self,
+    cef_browser_t *browser,
+    uint64_t prompt_id,
+    cef_permission_request_result_t result
+) {
 }
 
 static void CEF_CALLBACK OnAfterCreated(cef_life_span_handler_t *self, cef_browser_t *browser) {
@@ -417,16 +602,28 @@ static cmux_chromium_client_t *CreateClient(void) {
     InitBase(&client->life_span_handler.base, sizeof(cef_life_span_handler_t));
     InitBase(&client->display_handler.base, sizeof(cef_display_handler_t));
     InitBase(&client->load_handler.base, sizeof(cef_load_handler_t));
+    InitBase(&client->download_handler.base, sizeof(cef_download_handler_t));
+    InitBase(&client->permission_handler.base, sizeof(cef_permission_handler_t));
     client->client.get_life_span_handler = GetLifeSpanHandler;
     client->client.get_display_handler = GetDisplayHandler;
     client->client.get_load_handler = GetLoadHandler;
+    client->client.get_download_handler = GetDownloadHandler;
+    client->client.get_permission_handler = GetPermissionHandler;
     client->life_span_handler.on_after_created = OnAfterCreated;
     client->life_span_handler.do_close = DoClose;
+    client->life_span_handler.on_before_popup = OnBeforePopup;
     client->life_span_handler.on_before_close = OnBeforeClose;
     client->display_handler.on_address_change = OnAddressChange;
     client->display_handler.on_title_change = OnTitleChange;
+    client->display_handler.on_fullscreen_mode_change = OnFullscreenModeChange;
     client->display_handler.on_console_message = OnConsoleMessage;
     client->load_handler.on_loading_state_change = OnLoadingStateChange;
+    client->download_handler.can_download = CanDownload;
+    client->download_handler.on_before_download = OnBeforeDownload;
+    client->download_handler.on_download_updated = OnDownloadUpdated;
+    client->permission_handler.on_request_media_access_permission = OnRequestMediaAccessPermission;
+    client->permission_handler.on_show_permission_prompt = OnShowPermissionPrompt;
+    client->permission_handler.on_dismiss_permission_prompt = OnDismissPermissionPrompt;
     return client;
 }
 
@@ -677,6 +874,15 @@ void cmux_chromium_set_focus(void *browserHandle, BOOL focus) {
     cef_browser_host_t *host = handle->browser->get_host(handle->browser);
     if (!host) return;
     host->set_focus(host, focus ? 1 : 0);
+    host->base.release(&host->base);
+}
+
+void cmux_chromium_set_zoom_level(void *browserHandle, double zoomLevel) {
+    cmux_chromium_browser_t *handle = (cmux_chromium_browser_t *)browserHandle;
+    if (!handle || !handle->browser) return;
+    cef_browser_host_t *host = handle->browser->get_host(handle->browser);
+    if (!host) return;
+    host->set_zoom_level(host, zoomLevel);
     host->base.release(&host->base);
 }
 
