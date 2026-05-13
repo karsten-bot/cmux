@@ -103,10 +103,12 @@ final class ChromiumBrowserHostView: NSView {
     private static let browserClosedNotification = Notification.Name("CmuxChromiumBrowserClosedNotification")
     private static let popupRequestNotification = Notification.Name("CmuxChromiumPopupRequestNotification")
     private static let downloadEventNotification = Notification.Name("CmuxChromiumDownloadEventNotification")
+    private static let faviconURLsNotification = Notification.Name("CmuxChromiumFaviconURLsNotification")
     var onReactGrabMessage: (([String: Any]) -> Void)?
     var onNavigationStateChanged: ((ChromiumNavigationState) -> Void)?
     var onPopupRequest: ((URL) -> Void)?
     var onDownloadEvent: (([String: Any]) -> Void)?
+    var onFaviconURLsChanged: (([URL]) -> Void)?
 
     init(initialURL: URL?) {
         pendingURL = initialURL
@@ -594,6 +596,12 @@ final class ChromiumBrowserHostView: NSView {
                     name: Self.downloadEventNotification,
                     object: nil
                 )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleFaviconURLsNotification(_:)),
+                    name: Self.faviconURLsNotification,
+                    object: nil
+                )
             }
             pendingJavaScript.forEach { cmux_chromium_execute_javascript(browserHandle, $0) }
             pendingJavaScript.removeAll()
@@ -637,6 +645,17 @@ final class ChromiumBrowserHostView: NSView {
             (key as? String).map { ($0, value) }
         })
         onDownloadEvent?(event)
+    }
+
+    @objc private func handleFaviconURLsNotification(_ notification: Notification) {
+        guard let browserHandle,
+              let notifiedBrowserHandle = notification.userInfo?["browserHandle"] as? NSValue,
+              notifiedBrowserHandle.pointerValue == browserHandle,
+              let rawURLs = notification.userInfo?["urls"] as? [String] else {
+            return
+        }
+        let urls = rawURLs.compactMap(URL.init(string:))
+        onFaviconURLsChanged?(urls)
     }
 
     @objc private func handleNavigationStateNotification(_ notification: Notification) {

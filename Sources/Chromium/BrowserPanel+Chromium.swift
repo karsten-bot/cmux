@@ -20,6 +20,9 @@ extension BrowserPanel {
             chromiumHostView.onDownloadEvent = { [weak self] event in
                 self?.handleChromiumDownloadEvent(event)
             }
+            chromiumHostView.onFaviconURLsChanged = { [weak self] urls in
+                self?.refreshChromiumFavicon(from: urls)
+            }
             return chromiumHostView
         }
         let view = ChromiumBrowserHostView(initialURL: currentURL)
@@ -35,6 +38,9 @@ extension BrowserPanel {
         }
         view.onDownloadEvent = { [weak self] event in
             self?.handleChromiumDownloadEvent(event)
+        }
+        view.onFaviconURLsChanged = { [weak self] urls in
+            self?.refreshChromiumFavicon(from: urls)
         }
         chromiumHostView = view
         return view

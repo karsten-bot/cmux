@@ -32,6 +32,7 @@ static NSString *const CmuxChromiumNavigationStateNotification = @"CmuxChromiumN
 static NSString *const CmuxChromiumBrowserClosedNotification = @"CmuxChromiumBrowserClosedNotification";
 static NSString *const CmuxChromiumPopupRequestNotification = @"CmuxChromiumPopupRequestNotification";
 static NSString *const CmuxChromiumDownloadEventNotification = @"CmuxChromiumDownloadEventNotification";
+static NSString *const CmuxChromiumFaviconURLsNotification = @"CmuxChromiumFaviconURLsNotification";
 static BOOL g_initialized = NO;
 static NSTimer *g_scheduled_message_loop_timer = nil;
 static BOOL g_message_loop_working = NO;
@@ -435,6 +436,35 @@ static void CEF_CALLBACK OnTitleChange(
     PostNavigationState(client, browser, @{ @"title": NSStringFromCefString(title) });
 }
 
+static void CEF_CALLBACK OnFaviconURLChange(
+    cef_display_handler_t *self,
+    cef_browser_t *browser,
+    cef_string_list_t icon_urls
+) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, display_handler));
+    NSMutableArray<NSString *> *urls = [NSMutableArray array];
+    size_t count = cef_string_list_size(icon_urls);
+    for (size_t index = 0; index < count; index++) {
+        cef_string_t value = {};
+        if (!cef_string_list_value(icon_urls, index, &value)) continue;
+        NSString *url = NSStringFromCefString(&value);
+        cef_string_clear(&value);
+        if (url.length > 0) {
+            [urls addObject:url];
+        }
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!client->browser_handle) return;
+        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumFaviconURLsNotification
+                                                          object:nil
+                                                        userInfo:@{
+                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"urls": urls
+                                                        }];
+    });
+}
+
 static void CEF_CALLBACK OnFullscreenModeChange(
     cef_display_handler_t *self,
     cef_browser_t *browser,
@@ -615,6 +645,7 @@ static cmux_chromium_client_t *CreateClient(void) {
     client->life_span_handler.on_before_close = OnBeforeClose;
     client->display_handler.on_address_change = OnAddressChange;
     client->display_handler.on_title_change = OnTitleChange;
+    client->display_handler.on_favicon_urlchange = OnFaviconURLChange;
     client->display_handler.on_fullscreen_mode_change = OnFullscreenModeChange;
     client->display_handler.on_console_message = OnConsoleMessage;
     client->load_handler.on_loading_state_change = OnLoadingStateChange;

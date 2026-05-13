@@ -5811,8 +5811,6 @@ extension BrowserPanel {
             estimatedProgress = isLoading ? 0.35 : 1.0
             if isLoading {
                 faviconPNGData = nil
-            } else {
-                refreshChromiumFavicon()
             }
         }
         if let isFullscreen = state.isFullscreen {
@@ -5823,33 +5821,50 @@ extension BrowserPanel {
         refreshNavigationAvailability()
     }
 
-    private func refreshChromiumFavicon() {
-        guard let currentURL,
-              let iconURL = URL(string: "/favicon.ico", relativeTo: currentURL)?.absoluteURL else {
-            faviconPNGData = nil
-            return
+    func refreshChromiumFavicon(from iconURLs: [URL]) {
+        let candidates = iconURLs.filter { url in
+            guard let scheme = url.scheme?.lowercased() else { return false }
+            return scheme == "http" || scheme == "https"
         }
+        guard !candidates.isEmpty else { return }
 
         faviconTask?.cancel()
         faviconRefreshGeneration &+= 1
         let generation = faviconRefreshGeneration
         faviconTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            do {
-                let (data, response) = try await URLSession.shared.data(from: iconURL)
-                guard self.isCurrentFaviconRefresh(generation: generation),
-                      let httpResponse = response as? HTTPURLResponse,
-                      (200..<300).contains(httpResponse.statusCode),
-                      let image = NSImage(data: data),
-                      let tiff = image.tiffRepresentation,
-                      let bitmap = NSBitmapImageRep(data: tiff),
-                      let png = bitmap.representation(using: .png, properties: [:]) else {
+            for iconURL in candidates {
+                let iconURLString = iconURL.absoluteString
+                if iconURLString == self.lastFaviconURLString, self.faviconPNGData != nil {
                     return
                 }
-                self.faviconPNGData = png
-            } catch {
-                if self.isCurrentFaviconRefresh(generation: generation) {
-                    self.faviconPNGData = nil
+
+                var request = URLRequest(url: iconURL)
+                request.timeoutInterval = 2.0
+                request.cachePolicy = .returnCacheDataElseLoad
+                let effectiveRequest = self.remoteProxyPreparedRequest(from: request, logScope: "chromiumFaviconRewrite")
+
+                do {
+                    let remoteSession = self.remoteProxyURLSession()
+                    defer { remoteSession?.finishTasksAndInvalidate() }
+                    let data: Data
+                    let response: URLResponse
+                    if let remoteSession {
+                        (data, response) = try await remoteSession.data(for: effectiveRequest)
+                    } else {
+                        (data, response) = try await URLSession.shared.data(for: effectiveRequest)
+                    }
+                    guard self.isCurrentFaviconRefresh(generation: generation) else { return }
+                    guard let httpResponse = response as? HTTPURLResponse,
+                          (200..<300).contains(httpResponse.statusCode),
+                          let png = Self.makeFaviconPNGData(from: data, targetPx: 32) else {
+                        continue
+                    }
+                    self.lastFaviconURLString = iconURLString
+                    self.faviconPNGData = png
+                    return
+                } catch {
+                    guard self.isCurrentFaviconRefresh(generation: generation) else { return }
                 }
             }
         }
