@@ -9,6 +9,57 @@ final class CmuxChromiumNavigationPolicy: NSObject {
     }
 }
 
+@objc(CmuxChromiumContextMenuPolicy)
+final class CmuxChromiumContextMenuPolicy: NSObject {
+    @objc(menuItemsWithLinkURL:sourceURL:mediaType:)
+    static func menuItems(linkURL: String, sourceURL: String, mediaType: String) -> NSArray {
+        let items = NSMutableArray()
+        var addedCustomItems = false
+
+        if !linkURL.isEmpty {
+            items.add(["separatorIfNeeded": true])
+            items.add([
+                "action": "openLinkInNewTab",
+                "title": String(localized: "browser.contextMenu.openLinkInNewTab", defaultValue: "Open Link in New Tab"),
+            ])
+            items.add([
+                "action": "openLinkInDefaultBrowser",
+                "title": String(localized: "browser.contextMenu.openLinkInDefaultBrowser", defaultValue: "Open Link in Default Browser"),
+            ])
+            items.add([
+                "action": "downloadLinkedFile",
+                "title": String(localized: "browser.contextMenu.downloadLinkedFile", defaultValue: "Download Linked File"),
+            ])
+            addedCustomItems = true
+        }
+
+        if !sourceURL.isEmpty, mediaType == "image" {
+            items.add([addedCustomItems ? "separator" : "separatorIfNeeded": true])
+            items.add([
+                "action": "downloadImage",
+                "title": String(localized: "browser.contextMenu.downloadImage", defaultValue: "Download Image"),
+            ])
+            addedCustomItems = true
+        }
+
+        if addedCustomItems {
+            items.add(["separator": true])
+        } else {
+            items.add(["separatorIfNeeded": true])
+        }
+        items.add([
+            "action": "inspectElement",
+            "title": String(localized: "browser.contextMenu.inspectElement", defaultValue: "Inspect Element"),
+        ])
+        items.add([
+            "action": "moveTabToNewWorkspace",
+            "title": String(localized: "browser.contextMenu.moveTabToNewWorkspace", defaultValue: "Move Tab to New Workspace"),
+        ])
+
+        return items
+    }
+}
+
 extension BrowserPanel {
     var usesChromiumEngine: Bool {
         browserEngine == .chromium
@@ -35,6 +86,14 @@ extension BrowserPanel {
             chromiumHostView.onFindResult = { [weak self] count, activeMatchOrdinal in
                 self?.applyChromiumFindResult(count: count, activeMatchOrdinal: activeMatchOrdinal)
             }
+            chromiumHostView.onContextMenuMoveTabToNewWorkspace = { [weak self] in
+                guard let self else { return false }
+                return AppDelegate.shared?.moveSurfaceToNewWorkspace(
+                    panelId: self.id,
+                    focus: true,
+                    focusWindow: false
+                ) != nil
+            }
             return chromiumHostView
         }
         let view = ChromiumBrowserHostView(initialURL: currentURL)
@@ -56,6 +115,14 @@ extension BrowserPanel {
         }
         view.onFindResult = { [weak self] count, activeMatchOrdinal in
             self?.applyChromiumFindResult(count: count, activeMatchOrdinal: activeMatchOrdinal)
+        }
+        view.onContextMenuMoveTabToNewWorkspace = { [weak self] in
+            guard let self else { return false }
+            return AppDelegate.shared?.moveSurfaceToNewWorkspace(
+                panelId: self.id,
+                focus: true,
+                focusWindow: false
+            ) != nil
         }
         chromiumHostView = view
         return view

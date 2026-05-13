@@ -18,6 +18,7 @@
 #include "include/capi/cef_app_capi.h"
 #include "include/capi/cef_browser_capi.h"
 #include "include/capi/cef_browser_process_handler_capi.h"
+#include "include/capi/cef_context_menu_handler_capi.h"
 #include "include/capi/cef_display_handler_capi.h"
 #include "include/capi/cef_download_handler_capi.h"
 #include "include/capi/cef_find_handler_capi.h"
@@ -39,6 +40,13 @@ static NSString *const CmuxChromiumPopupRequestNotification = @"CmuxChromiumPopu
 static NSString *const CmuxChromiumDownloadEventNotification = @"CmuxChromiumDownloadEventNotification";
 static NSString *const CmuxChromiumFaviconURLsNotification = @"CmuxChromiumFaviconURLsNotification";
 static NSString *const CmuxChromiumFindResultNotification = @"CmuxChromiumFindResultNotification";
+static NSString *const CmuxChromiumContextMenuActionNotification = @"CmuxChromiumContextMenuActionNotification";
+static const int CmuxChromiumMenuOpenLinkInNewTab = MENU_ID_USER_FIRST + 1;
+static const int CmuxChromiumMenuOpenLinkInDefaultBrowser = MENU_ID_USER_FIRST + 2;
+static const int CmuxChromiumMenuDownloadLinkedFile = MENU_ID_USER_FIRST + 3;
+static const int CmuxChromiumMenuDownloadImage = MENU_ID_USER_FIRST + 4;
+static const int CmuxChromiumMenuMoveTabToNewWorkspace = MENU_ID_USER_FIRST + 5;
+static const int CmuxChromiumMenuInspectElement = MENU_ID_USER_FIRST + 6;
 static BOOL g_initialized = NO;
 static NSTimer *g_scheduled_message_loop_timer = nil;
 static BOOL g_message_loop_working = NO;
@@ -83,6 +91,19 @@ static void SetLastError(NSString *message) {
 static void SetCefString(cef_string_t *target, NSString *value) {
     const char *utf8 = value.UTF8String ?: "";
     cef_string_from_utf8(utf8, strlen(utf8), target);
+}
+
+static void AddMenuItem(cef_menu_model_t *model, int commandID, NSString *label) {
+    if (!model || !label) return;
+    cef_string_t cef_label = {};
+    SetCefString(&cef_label, label);
+    model->add_item(model, commandID, &cef_label);
+    cef_string_clear(&cef_label);
+}
+
+static void AddMenuSeparatorIfNeeded(cef_menu_model_t *model) {
+    if (!model || model->get_count(model) == 0) return;
+    model->add_separator(model);
 }
 
 static NSString *NSStringFromCefString(const cef_string_t *value) {
@@ -131,6 +152,7 @@ static void CmuxInstallChromiumEventBridge(void) {
 typedef struct cmux_chromium_client_t {
     cef_client_t client;
     cef_life_span_handler_t life_span_handler;
+    cef_context_menu_handler_t context_menu_handler;
     cef_display_handler_t display_handler;
     cef_load_handler_t load_handler;
     cef_request_handler_t request_handler;
@@ -473,6 +495,11 @@ static cef_life_span_handler_t *CEF_CALLBACK GetLifeSpanHandler(cef_client_t *se
     return &client->life_span_handler;
 }
 
+static cef_context_menu_handler_t *CEF_CALLBACK GetContextMenuHandler(cef_client_t *self) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)self;
+    return &client->context_menu_handler;
+}
+
 static cef_display_handler_t *CEF_CALLBACK GetDisplayHandler(cef_client_t *self) {
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)self;
     return &client->display_handler;
@@ -544,8 +571,176 @@ static void CmuxChromiumPostPopupRequest(
                                                             @"userGesture": @(userGesture),
                                                             @"popupFeaturesWereSpecified": @(popupFeaturesWereSpecified),
                                                             @"openerURL": openerURL ?: @""
-                                                        }];
+        }];
     });
+}
+
+static void CmuxChromiumPostContextMenuAction(cmux_chromium_client_t *client, NSString *action, NSDictionary *extraUserInfo) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!client->browser_handle) return;
+        NSMutableDictionary *userInfo = [@{
+            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+            @"action": action ?: @""
+        } mutableCopy];
+        if (extraUserInfo) {
+            [userInfo addEntriesFromDictionary:extraUserInfo];
+        }
+        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumContextMenuActionNotification
+                                                          object:nil
+                                                        userInfo:userInfo];
+    });
+}
+
+static void CmuxChromiumStartDownload(cef_browser_t *browser, NSString *url) {
+    if (!browser || url.length == 0) return;
+    cef_browser_host_t *host = browser->get_host(browser);
+    if (!host) return;
+    cef_string_t cef_url = {};
+    SetCefString(&cef_url, url);
+    host->start_download(host, &cef_url);
+    cef_string_clear(&cef_url);
+    host->base.release(&host->base);
+}
+
+static NSString *CmuxChromiumContextMenuLinkURL(cef_context_menu_params_t *params) {
+    if (!params) return @"";
+    return NSStringFromCefUserFreeString(params->get_link_url(params));
+}
+
+static NSString *CmuxChromiumContextMenuSourceURL(cef_context_menu_params_t *params) {
+    if (!params) return @"";
+    return NSStringFromCefUserFreeString(params->get_source_url(params));
+}
+
+static NSString *CmuxChromiumContextMenuMediaType(cef_context_menu_params_t *params) {
+    if (!params) return @"";
+    switch (params->get_media_type(params)) {
+    case CM_MEDIATYPE_IMAGE:
+        return @"image";
+    case CM_MEDIATYPE_VIDEO:
+        return @"video";
+    case CM_MEDIATYPE_AUDIO:
+        return @"audio";
+    case CM_MEDIATYPE_CANVAS:
+        return @"canvas";
+    case CM_MEDIATYPE_FILE:
+        return @"file";
+    case CM_MEDIATYPE_PLUGIN:
+        return @"plugin";
+    default:
+        return @"";
+    }
+}
+
+static int CmuxChromiumContextMenuCommandForAction(NSString *action) {
+    if ([action isEqualToString:@"openLinkInNewTab"]) return CmuxChromiumMenuOpenLinkInNewTab;
+    if ([action isEqualToString:@"openLinkInDefaultBrowser"]) return CmuxChromiumMenuOpenLinkInDefaultBrowser;
+    if ([action isEqualToString:@"downloadLinkedFile"]) return CmuxChromiumMenuDownloadLinkedFile;
+    if ([action isEqualToString:@"downloadImage"]) return CmuxChromiumMenuDownloadImage;
+    if ([action isEqualToString:@"moveTabToNewWorkspace"]) return CmuxChromiumMenuMoveTabToNewWorkspace;
+    if ([action isEqualToString:@"inspectElement"]) return CmuxChromiumMenuInspectElement;
+    return 0;
+}
+
+static NSString *CmuxChromiumContextMenuActionForCommand(int commandID) {
+    switch (commandID) {
+    case CmuxChromiumMenuOpenLinkInNewTab:
+        return @"openLinkInNewTab";
+    case CmuxChromiumMenuOpenLinkInDefaultBrowser:
+        return @"openLinkInDefaultBrowser";
+    case CmuxChromiumMenuDownloadLinkedFile:
+        return @"downloadLinkedFile";
+    case CmuxChromiumMenuDownloadImage:
+        return @"downloadImage";
+    case CmuxChromiumMenuMoveTabToNewWorkspace:
+        return @"moveTabToNewWorkspace";
+    case CmuxChromiumMenuInspectElement:
+        return @"inspectElement";
+    default:
+        return @"";
+    }
+}
+
+static NSArray<NSDictionary *> *CmuxChromiumContextMenuItems(NSString *linkURL, NSString *sourceURL, NSString *mediaType) {
+    Class policyClass = NSClassFromString(@"CmuxChromiumContextMenuPolicy");
+    SEL selector = @selector(menuItemsWithLinkURL:sourceURL:mediaType:);
+    if (!policyClass || ![policyClass respondsToSelector:selector]) return @[];
+    NSArray<NSDictionary *> *(*send)(id, SEL, NSString *, NSString *, NSString *) =
+        (NSArray<NSDictionary *> *(*)(id, SEL, NSString *, NSString *, NSString *))objc_msgSend;
+    NSArray<NSDictionary *> *items = send(policyClass, selector, linkURL ?: @"", sourceURL ?: @"", mediaType ?: @"");
+    return [items isKindOfClass:NSArray.class] ? items : @[];
+}
+
+static void CEF_CALLBACK OnBeforeContextMenu(
+    cef_context_menu_handler_t *self,
+    cef_browser_t *browser,
+    cef_frame_t *frame,
+    cef_context_menu_params_t *params,
+    cef_menu_model_t *model
+) {
+    if (!model || !params) return;
+
+    NSArray<NSDictionary *> *items = CmuxChromiumContextMenuItems(
+        CmuxChromiumContextMenuLinkURL(params),
+        CmuxChromiumContextMenuSourceURL(params),
+        CmuxChromiumContextMenuMediaType(params)
+    );
+    for (NSDictionary *item in items) {
+        if ([item[@"separator"] boolValue]) {
+            model->add_separator(model);
+            continue;
+        }
+        if ([item[@"separatorIfNeeded"] boolValue]) {
+            AddMenuSeparatorIfNeeded(model);
+            continue;
+        }
+        int commandID = CmuxChromiumContextMenuCommandForAction(item[@"action"]);
+        NSString *title = item[@"title"];
+        if (commandID != 0 && [title isKindOfClass:NSString.class] && title.length > 0) {
+            AddMenuItem(model, commandID, title);
+        }
+    }
+}
+
+static int CEF_CALLBACK OnContextMenuCommand(
+    cef_context_menu_handler_t *self,
+    cef_browser_t *browser,
+    cef_frame_t *frame,
+    cef_context_menu_params_t *params,
+    int command_id,
+    cef_event_flags_t event_flags
+) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, context_menu_handler));
+    NSString *linkURL = CmuxChromiumContextMenuLinkURL(params);
+    NSString *sourceURL = CmuxChromiumContextMenuSourceURL(params);
+
+    switch (command_id) {
+    case CmuxChromiumMenuOpenLinkInNewTab:
+    case CmuxChromiumMenuOpenLinkInDefaultBrowser:
+        CmuxChromiumPostContextMenuAction(client, CmuxChromiumContextMenuActionForCommand(command_id), @{
+            @"linkURL": linkURL ?: @"",
+            @"sourceURL": sourceURL ?: @"",
+            @"openerURL": CmuxChromiumBrowserURL(browser)
+        });
+        return 1;
+    case CmuxChromiumMenuDownloadLinkedFile:
+        CmuxChromiumStartDownload(browser, linkURL);
+        return 1;
+    case CmuxChromiumMenuDownloadImage:
+        CmuxChromiumStartDownload(browser, sourceURL);
+        return 1;
+    case CmuxChromiumMenuMoveTabToNewWorkspace:
+        CmuxChromiumPostContextMenuAction(client, @"moveTabToNewWorkspace", nil);
+        return 1;
+    case CmuxChromiumMenuInspectElement:
+        CmuxChromiumPostContextMenuAction(client, @"inspectElement", @{
+            @"x": @(params ? params->get_xcoord(params) : 0),
+            @"y": @(params ? params->get_ycoord(params) : 0)
+        });
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 static BOOL CmuxChromiumDispositionOpensTab(cef_window_open_disposition_t disposition) {
@@ -1032,6 +1227,7 @@ static cmux_chromium_client_t *CreateClient(void) {
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)calloc(1, sizeof(cmux_chromium_client_t));
     InitBase(&client->client.base, sizeof(cef_client_t));
     InitBase(&client->life_span_handler.base, sizeof(cef_life_span_handler_t));
+    InitBase(&client->context_menu_handler.base, sizeof(cef_context_menu_handler_t));
     InitBase(&client->display_handler.base, sizeof(cef_display_handler_t));
     InitBase(&client->load_handler.base, sizeof(cef_load_handler_t));
     InitBase(&client->request_handler.base, sizeof(cef_request_handler_t));
@@ -1039,6 +1235,7 @@ static cmux_chromium_client_t *CreateClient(void) {
     InitBase(&client->permission_handler.base, sizeof(cef_permission_handler_t));
     InitBase(&client->find_handler.base, sizeof(cef_find_handler_t));
     client->client.get_life_span_handler = GetLifeSpanHandler;
+    client->client.get_context_menu_handler = GetContextMenuHandler;
     client->client.get_display_handler = GetDisplayHandler;
     client->client.get_load_handler = GetLoadHandler;
     client->client.get_request_handler = GetRequestHandler;
@@ -1050,6 +1247,8 @@ static cmux_chromium_client_t *CreateClient(void) {
     client->life_span_handler.on_before_popup = OnBeforePopup;
     client->life_span_handler.on_before_popup_aborted = OnBeforePopupAborted;
     client->life_span_handler.on_before_close = OnBeforeClose;
+    client->context_menu_handler.on_before_context_menu = OnBeforeContextMenu;
+    client->context_menu_handler.on_context_menu_command = OnContextMenuCommand;
     client->display_handler.on_address_change = OnAddressChange;
     client->display_handler.on_title_change = OnTitleChange;
     client->display_handler.on_favicon_urlchange = OnFaviconURLChange;

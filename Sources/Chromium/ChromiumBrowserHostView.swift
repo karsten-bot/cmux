@@ -108,12 +108,14 @@ final class ChromiumBrowserHostView: NSView {
     private static let downloadEventNotification = Notification.Name("CmuxChromiumDownloadEventNotification")
     private static let faviconURLsNotification = Notification.Name("CmuxChromiumFaviconURLsNotification")
     private static let findResultNotification = Notification.Name("CmuxChromiumFindResultNotification")
+    private static let contextMenuActionNotification = Notification.Name("CmuxChromiumContextMenuActionNotification")
     var onReactGrabMessage: (([String: Any]) -> Void)?
     var onNavigationStateChanged: ((ChromiumNavigationState) -> Void)?
     var onPopupRequest: ((URL) -> Void)?
     var onDownloadEvent: (([String: Any]) -> Void)?
     var onFaviconURLsChanged: (([URL]) -> Void)?
     var onFindResult: ((Int, Int) -> Void)?
+    var onContextMenuMoveTabToNewWorkspace: (() -> Bool)?
 
     init(initialURL: URL?) {
         pendingURL = initialURL
@@ -309,6 +311,15 @@ final class ChromiumBrowserHostView: NSView {
         return try await Task.detached {
             try Self.evaluateJavaScriptWithRemoteDebuggingSync(script, pageURL: pageURL, timeout: timeout)
         }.value
+    }
+
+    private func inspectElementAt(x: Int, y: Int) {
+        guard browserHandle != nil else { return }
+        let pageURL = currentURL ?? pendingURL
+        _ = showDeveloperTools()
+        Task.detached {
+            try? Self.inspectElementWithRemoteDebuggingSync(x: x, y: y, pageURL: pageURL, timeout: 3)
+        }
     }
 
     func takeSnapshot() -> NSImage? {
@@ -715,6 +726,12 @@ final class ChromiumBrowserHostView: NSView {
                     name: Self.findResultNotification,
                     object: nil
                 )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleContextMenuActionNotification(_:)),
+                    name: Self.contextMenuActionNotification,
+                    object: nil
+                )
             }
             pendingJavaScript.forEach { cmux_chromium_execute_javascript(browserHandle, $0) }
             pendingJavaScript.removeAll()
@@ -798,6 +815,41 @@ final class ChromiumBrowserHostView: NSView {
             return
         }
         onFindResult?(count, activeMatchOrdinal)
+    }
+
+    @objc private func handleContextMenuActionNotification(_ notification: Notification) {
+        guard let browserHandle,
+              let notifiedBrowserHandle = notification.userInfo?["browserHandle"] as? NSValue,
+              notifiedBrowserHandle.pointerValue == browserHandle,
+              let action = notification.userInfo?["action"] as? String else {
+            return
+        }
+
+        switch action {
+        case "openLinkInNewTab":
+            if let url = contextMenuURL(from: notification.userInfo?["linkURL"]) {
+                onPopupRequest?(url)
+            }
+        case "openLinkInDefaultBrowser":
+            if let url = contextMenuURL(from: notification.userInfo?["linkURL"]) {
+                NSWorkspace.shared.open(url)
+            }
+        case "moveTabToNewWorkspace":
+            if onContextMenuMoveTabToNewWorkspace?() != true {
+                NSSound.beep()
+            }
+        case "inspectElement":
+            let x = (notification.userInfo?["x"] as? NSNumber)?.intValue ?? 0
+            let y = (notification.userInfo?["y"] as? NSNumber)?.intValue ?? 0
+            inspectElementAt(x: x, y: y)
+        default:
+            break
+        }
+    }
+
+    private func contextMenuURL(from value: Any?) -> URL? {
+        guard let rawURL = value as? String, !rawURL.isEmpty else { return nil }
+        return URL(string: rawURL)
     }
 
     @objc private func handleNavigationStateNotification(_ notification: Notification) {
@@ -917,6 +969,69 @@ final class ChromiumBrowserHostView: NSView {
             throw ChromiumJavaScriptError(message: "Chromium DevTools returned an invalid response.")
         }
         return try decodeDevToolsEvaluationResult(object)
+    }
+
+    private nonisolated static func inspectElementWithRemoteDebuggingSync(
+        x: Int,
+        y: Int,
+        pageURL: URL?,
+        timeout: TimeInterval
+    ) throws {
+        guard let webSocketURL = resolveDevToolsWebSocketURLSync(for: pageURL) else {
+            throw ChromiumJavaScriptError(message: "Chromium DevTools target was not available.")
+        }
+        let node = try sendDevToolsCommandSync(
+            method: "DOM.getNodeForLocation",
+            params: [
+                "x": x,
+                "y": y,
+                "includeUserAgentShadowDOM": true,
+                "ignorePointerEventsNone": true,
+            ],
+            to: webSocketURL,
+            timeout: timeout
+        )
+        let result = node["result"] as? [String: Any]
+        if let backendNodeId = result?["backendNodeId"] as? Int {
+            _ = try sendDevToolsCommandSync(
+                method: "DOM.inspectNode",
+                params: ["backendNodeId": backendNodeId],
+                to: webSocketURL,
+                timeout: timeout
+            )
+        } else if let nodeId = result?["nodeId"] as? Int {
+            _ = try sendDevToolsCommandSync(
+                method: "DOM.inspectNode",
+                params: ["nodeId": nodeId],
+                to: webSocketURL,
+                timeout: timeout
+            )
+        }
+    }
+
+    private nonisolated static func sendDevToolsCommandSync(
+        method: String,
+        params: [String: Any],
+        to url: URL,
+        timeout: TimeInterval
+    ) throws -> [String: Any] {
+        let object: [String: Any] = [
+            "id": 1,
+            "method": method,
+            "params": params,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object)
+        let message = String(decoding: data, as: UTF8.self)
+        let responseData = try sendDevToolsWebSocketMessageSync(message, to: url, timeout: timeout)
+        guard let response = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+              response["id"] as? Int == 1 else {
+            throw ChromiumJavaScriptError(message: "Chromium DevTools returned an invalid response.")
+        }
+        if let error = response["error"] as? [String: Any],
+           let message = error["message"] as? String {
+            throw ChromiumJavaScriptError(message: message)
+        }
+        return response
     }
 
     private nonisolated static func sendDevToolsWebSocketMessageSync(_ message: String, to url: URL, timeout: TimeInterval) throws -> Data {
