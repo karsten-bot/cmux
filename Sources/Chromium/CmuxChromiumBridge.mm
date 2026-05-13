@@ -704,6 +704,119 @@ static NSArray<NSDictionary *> *CmuxChromiumContextMenuItems(NSString *linkURL, 
     return [items isKindOfClass:NSArray.class] ? items : @[];
 }
 
+static void AddPermissionKey(NSMutableArray<NSString *> *keys, uint32_t permissions, uint32_t flag, NSString *key) {
+    if ((permissions & flag) != 0) {
+        [keys addObject:key];
+    }
+}
+
+static NSArray<NSString *> *CmuxChromiumMediaPermissionKeys(uint32_t permissions) {
+    NSMutableArray<NSString *> *keys = [NSMutableArray array];
+    AddPermissionKey(keys, permissions, CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE, @"microphone");
+    AddPermissionKey(keys, permissions, CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE, @"camera");
+    AddPermissionKey(keys, permissions, CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE, @"desktopAudio");
+    AddPermissionKey(keys, permissions, CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE, @"desktopVideo");
+    return keys;
+}
+
+static NSArray<NSString *> *CmuxChromiumPermissionKeys(uint32_t permissions) {
+    NSMutableArray<NSString *> *keys = [NSMutableArray array];
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_AR_SESSION, @"arSession");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_CAMERA_PAN_TILT_ZOOM, @"cameraPanTiltZoom");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_CAMERA_STREAM, @"camera");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_CAPTURED_SURFACE_CONTROL, @"capturedSurfaceControl");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_CLIPBOARD, @"clipboard");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_TOP_LEVEL_STORAGE_ACCESS, @"topLevelStorageAccess");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_DISK_QUOTA, @"diskQuota");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_LOCAL_FONTS, @"localFonts");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_GEOLOCATION, @"geolocation");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_HAND_TRACKING, @"handTracking");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_IDENTITY_PROVIDER, @"identityProvider");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_IDLE_DETECTION, @"idleDetection");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_MIC_STREAM, @"microphone");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_MIDI_SYSEX, @"midiSysex");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS, @"multipleDownloads");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_NOTIFICATIONS, @"notifications");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_KEYBOARD_LOCK, @"keyboardLock");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_POINTER_LOCK, @"pointerLock");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_PROTECTED_MEDIA_IDENTIFIER, @"protectedMediaIdentifier");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_REGISTER_PROTOCOL_HANDLER, @"registerProtocolHandler");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_STORAGE_ACCESS, @"storageAccess");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_VR_SESSION, @"vrSession");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_WEB_APP_INSTALLATION, @"webAppInstallation");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_WINDOW_MANAGEMENT, @"windowManagement");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_FILE_SYSTEM_ACCESS, @"fileSystemAccess");
+#if CEF_API_ADDED(13600)
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS, @"localNetwork");
+#endif
+#if CEF_API_ADDED(14500)
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_LOCAL_NETWORK, @"localNetwork");
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_LOOPBACK_NETWORK, @"loopbackNetwork");
+#endif
+#if CEF_API_ADDED(14700)
+    AddPermissionKey(keys, permissions, CEF_PERMISSION_TYPE_SENSORS, @"sensors");
+#endif
+    return keys;
+}
+
+static NSDictionary *CmuxChromiumPermissionPromptConfiguration(NSString *origin, NSArray<NSString *> *permissionKeys) {
+    Class policyClass = NSClassFromString(@"CmuxChromiumPermissionPromptPolicy");
+    SEL selector = @selector(promptConfigurationWithOrigin:permissionKeys:);
+    if (policyClass && [policyClass respondsToSelector:selector]) {
+        NSDictionary *(*send)(id, SEL, NSString *, NSArray<NSString *> *) =
+            (NSDictionary *(*)(id, SEL, NSString *, NSArray<NSString *> *))objc_msgSend;
+        NSDictionary *configuration = send(policyClass, selector, origin ?: @"", permissionKeys ?: @[]);
+        if ([configuration isKindOfClass:NSDictionary.class]) {
+            return configuration;
+        }
+    }
+    return @{
+        @"title": origin.length > 0
+            ? [NSString stringWithFormat:@"Allow %@ to use browser permissions?", origin]
+            : @"Allow this site to use browser permissions?",
+        @"message": @"cmux will ask again next time.",
+        @"allowTitle": @"Allow",
+        @"denyTitle": @"Don't Allow",
+    };
+}
+
+static NSWindow *CmuxChromiumBrowserWindow(cef_browser_t *browser) {
+    if (!browser) return nil;
+    cef_browser_host_t *host = browser->get_host(browser);
+    if (!host) return nil;
+    void *window_handle = host->get_window_handle(host);
+    host->base.release(&host->base);
+    NSView *view = (__bridge NSView *)window_handle;
+    return view.window;
+}
+
+static void CmuxChromiumShowPermissionPrompt(
+    cef_browser_t *browser,
+    NSString *origin,
+    NSArray<NSString *> *permissionKeys,
+    void (^decisionHandler)(BOOL allow)
+) {
+    NSWindow *window = CmuxChromiumBrowserWindow(browser);
+    NSDictionary *configuration = CmuxChromiumPermissionPromptConfiguration(origin, permissionKeys);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.alertStyle = NSAlertStyleInformational;
+        alert.messageText = configuration[@"title"] ?: @"Allow this site to use browser permissions?";
+        alert.informativeText = configuration[@"message"] ?: @"cmux will ask again next time.";
+        [alert addButtonWithTitle:configuration[@"allowTitle"] ?: @"Allow"];
+        [alert addButtonWithTitle:configuration[@"denyTitle"] ?: @"Don't Allow"];
+
+        void (^complete)(NSModalResponse) = ^(NSModalResponse response) {
+            decisionHandler(response == NSAlertFirstButtonReturn);
+        };
+        if (window) {
+            [alert beginSheetModalForWindow:window completionHandler:complete];
+        } else {
+            complete([alert runModal]);
+        }
+    });
+}
+
 static void CEF_CALLBACK OnBeforeContextMenu(
     cef_context_menu_handler_t *self,
     cef_browser_t *browser,
@@ -1251,7 +1364,20 @@ static int CEF_CALLBACK OnRequestMediaAccessPermission(
     cef_media_access_callback_t *callback
 ) {
     if (!callback) return 0;
-    callback->cont(callback, requested_permissions);
+    callback->base.add_ref(&callback->base);
+    CmuxChromiumShowPermissionPrompt(
+        browser,
+        NSStringFromCefString(requesting_origin),
+        CmuxChromiumMediaPermissionKeys(requested_permissions),
+        ^(BOOL allow) {
+            if (allow) {
+                callback->cont(callback, requested_permissions);
+            } else {
+                callback->cancel(callback);
+            }
+            callback->base.release(&callback->base);
+        }
+    );
     return 1;
 }
 
@@ -1264,7 +1390,16 @@ static int CEF_CALLBACK OnShowPermissionPrompt(
     cef_permission_prompt_callback_t *callback
 ) {
     if (!callback) return 0;
-    callback->cont(callback, CEF_PERMISSION_RESULT_ACCEPT);
+    callback->base.add_ref(&callback->base);
+    CmuxChromiumShowPermissionPrompt(
+        browser,
+        NSStringFromCefString(requesting_origin),
+        CmuxChromiumPermissionKeys(requested_permissions),
+        ^(BOOL allow) {
+            callback->cont(callback, allow ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
+            callback->base.release(&callback->base);
+        }
+    );
     return 1;
 }
 

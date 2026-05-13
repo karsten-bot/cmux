@@ -60,6 +60,100 @@ final class CmuxChromiumContextMenuPolicy: NSObject {
     }
 }
 
+@objc(CmuxChromiumPermissionPromptPolicy)
+final class CmuxChromiumPermissionPromptPolicy: NSObject {
+    @objc(promptConfigurationWithOrigin:permissionKeys:)
+    static func promptConfiguration(origin: String, permissionKeys: NSArray) -> NSDictionary {
+        let site = origin.isEmpty
+            ? String(localized: "browser.permission.thisSite", defaultValue: "This site")
+            : origin
+        let names = permissionKeys.compactMap { $0 as? String }.map(permissionName).filter { !$0.isEmpty }
+        let permissionText = names.isEmpty
+            ? String(localized: "browser.permission.browserPermissions", defaultValue: "browser permissions")
+            : names.joined(separator: ", ")
+
+        return [
+            "title": String(
+                localized: "browser.permission.prompt.title",
+                defaultValue: "Allow \(site) to use \(permissionText)?"
+            ),
+            "message": String(
+                localized: "browser.permission.prompt.message",
+                defaultValue: "cmux will ask again next time."
+            ),
+            "allowTitle": String(localized: "common.allow", defaultValue: "Allow"),
+            "denyTitle": String(localized: "browser.permission.deny", defaultValue: "Don't Allow"),
+        ]
+    }
+
+    private static func permissionName(_ key: String) -> String {
+        switch key {
+        case "arSession":
+            return String(localized: "browser.permission.arSession", defaultValue: "augmented reality")
+        case "cameraPanTiltZoom":
+            return String(localized: "browser.permission.cameraPanTiltZoom", defaultValue: "camera pan, tilt, and zoom")
+        case "camera":
+            return String(localized: "browser.permission.camera", defaultValue: "camera")
+        case "capturedSurfaceControl":
+            return String(localized: "browser.permission.capturedSurfaceControl", defaultValue: "captured screen control")
+        case "clipboard":
+            return String(localized: "browser.permission.clipboard", defaultValue: "clipboard")
+        case "topLevelStorageAccess":
+            return String(localized: "browser.permission.topLevelStorageAccess", defaultValue: "top-level storage access")
+        case "diskQuota":
+            return String(localized: "browser.permission.diskQuota", defaultValue: "extra storage")
+        case "localFonts":
+            return String(localized: "browser.permission.localFonts", defaultValue: "local fonts")
+        case "geolocation":
+            return String(localized: "browser.permission.geolocation", defaultValue: "location")
+        case "handTracking":
+            return String(localized: "browser.permission.handTracking", defaultValue: "hand tracking")
+        case "identityProvider":
+            return String(localized: "browser.permission.identityProvider", defaultValue: "identity provider")
+        case "idleDetection":
+            return String(localized: "browser.permission.idleDetection", defaultValue: "idle detection")
+        case "microphone":
+            return String(localized: "browser.permission.microphone", defaultValue: "microphone")
+        case "midiSysex":
+            return String(localized: "browser.permission.midiSysex", defaultValue: "MIDI devices")
+        case "multipleDownloads":
+            return String(localized: "browser.permission.multipleDownloads", defaultValue: "multiple downloads")
+        case "notifications":
+            return String(localized: "browser.permission.notifications", defaultValue: "notifications")
+        case "keyboardLock":
+            return String(localized: "browser.permission.keyboardLock", defaultValue: "keyboard lock")
+        case "pointerLock":
+            return String(localized: "browser.permission.pointerLock", defaultValue: "pointer lock")
+        case "protectedMediaIdentifier":
+            return String(localized: "browser.permission.protectedMediaIdentifier", defaultValue: "protected media identifier")
+        case "registerProtocolHandler":
+            return String(localized: "browser.permission.registerProtocolHandler", defaultValue: "protocol handler registration")
+        case "storageAccess":
+            return String(localized: "browser.permission.storageAccess", defaultValue: "storage access")
+        case "vrSession":
+            return String(localized: "browser.permission.vrSession", defaultValue: "virtual reality")
+        case "webAppInstallation":
+            return String(localized: "browser.permission.webAppInstallation", defaultValue: "web app installation")
+        case "windowManagement":
+            return String(localized: "browser.permission.windowManagement", defaultValue: "window management")
+        case "fileSystemAccess":
+            return String(localized: "browser.permission.fileSystemAccess", defaultValue: "file system access")
+        case "localNetwork":
+            return String(localized: "browser.permission.localNetwork", defaultValue: "local network")
+        case "loopbackNetwork":
+            return String(localized: "browser.permission.loopbackNetwork", defaultValue: "loopback network")
+        case "sensors":
+            return String(localized: "browser.permission.sensors", defaultValue: "sensors")
+        case "desktopAudio":
+            return String(localized: "browser.permission.desktopAudio", defaultValue: "desktop audio")
+        case "desktopVideo":
+            return String(localized: "browser.permission.desktopVideo", defaultValue: "screen recording")
+        default:
+            return String(localized: "browser.permission.browserPermissions", defaultValue: "browser permissions")
+        }
+    }
+}
+
 extension BrowserPanel {
     var usesChromiumEngine: Bool {
         browserEngine == .chromium
