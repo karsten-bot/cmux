@@ -2801,31 +2801,33 @@ struct ContentView: View {
         })
 
         view = AnyView(view.onReceive(NotificationCenter.default.publisher(for: .browserDidBecomeFirstResponderWebView)) { notification in
-            guard let webView = notification.object as? WKWebView,
-                  let selectedTabId = tabManager.selectedTabId,
+            guard let selectedTabId = tabManager.selectedTabId,
                   let selectedWorkspace = tabManager.selectedWorkspace,
                   let focusedPanelId = selectedWorkspace.focusedPanelId,
                   let focusedBrowser = selectedWorkspace.browserPanel(for: focusedPanelId),
-                  focusedBrowser.webView === webView else { return }
+                  let notificationWindow = focusedBrowser.browserFocusNotificationWindow(for: notification.object) else { return }
             AppDelegate.shared?.noteMainPanelKeyboardFocusIntent(
                 workspaceId: selectedTabId,
                 panelId: focusedPanelId,
-                in: observedWindow ?? webView.window
+                in: observedWindow ?? notificationWindow
             )
             completeWorkspaceHandoffIfNeeded(focusedTabId: selectedTabId, reason: "browser_first_responder")
             attemptCommandPaletteFocusRestoreIfNeeded()
         })
 
         view = AnyView(view.onReceive(NotificationCenter.default.publisher(for: .webViewDidReceiveClick)) { notification in
-            guard let webView = notification.object as? WKWebView,
-                  let selectedTabId = tabManager.selectedTabId,
-                  let selectedWorkspace = tabManager.selectedWorkspace,
-                  let focusedBrowser = selectedWorkspace.panels.values.compactMap({ $0 as? BrowserPanel })
-                    .first(where: { $0.webView === webView }) else { return }
+            guard let selectedTabId = tabManager.selectedTabId,
+                  let selectedWorkspace = tabManager.selectedWorkspace else { return }
+            guard let (focusedBrowser, notificationWindow) = selectedWorkspace.panels.values
+                .compactMap({ $0 as? BrowserPanel })
+                .compactMap({ panel in
+                    panel.browserFocusNotificationWindow(for: notification.object).map { (panel, $0) }
+                })
+                .first else { return }
             AppDelegate.shared?.noteMainPanelKeyboardFocusIntent(
                 workspaceId: selectedTabId,
                 panelId: focusedBrowser.id,
-                in: observedWindow ?? webView.window
+                in: observedWindow ?? notificationWindow
             )
         })
 

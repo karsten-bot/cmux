@@ -1,4 +1,5 @@
 import AppKit
+import WebKit
 
 @objc(CmuxChromiumNavigationPolicy)
 final class CmuxChromiumNavigationPolicy: NSObject {
@@ -240,6 +241,17 @@ extension BrowserPanel {
             current = candidate.nextResponder
         }
         return false
+    }
+
+    func browserFocusNotificationWindow(for object: Any?) -> NSWindow? {
+        if let webView = object as? WKWebView, webView === self.webView {
+            return webView.window
+        }
+        if let chromiumHostView = object as? ChromiumBrowserHostView,
+           chromiumHostView === self.chromiumHostView {
+            return chromiumHostView.window
+        }
+        return nil
     }
 
     func chromiumGoBackIfNeeded() -> Bool {

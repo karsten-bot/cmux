@@ -86,6 +86,7 @@ final class ChromiumBrowserHostView: NSView {
     private var currentURL: URL?
     private var devToolsOpenTask: Task<Void, Never>?
     private var devToolsDividerEventMonitor: Any?
+    private var contentFocusEventMonitor: Any?
     private var devToolsDividerTrackingArea: NSTrackingArea?
     private var pendingJavaScript: [String] = []
     private var browserNotificationObject: AnyObject?
@@ -156,6 +157,9 @@ final class ChromiumBrowserHostView: NSView {
         if let devToolsDividerEventMonitor {
             NSEvent.removeMonitor(devToolsDividerEventMonitor)
         }
+        if let contentFocusEventMonitor {
+            NSEvent.removeMonitor(contentFocusEventMonitor)
+        }
         if let devToolsDividerTrackingArea {
             removeTrackingArea(devToolsDividerTrackingArea)
         }
@@ -171,6 +175,7 @@ final class ChromiumBrowserHostView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         ensureBrowserCreated()
+        updateContentFocusEventMonitor()
         window?.invalidateCursorRects(for: self)
     }
 
@@ -192,6 +197,7 @@ final class ChromiumBrowserHostView: NSView {
 
     override func becomeFirstResponder() -> Bool {
         setBrowserFocused(true)
+        NotificationCenter.default.post(name: .browserDidBecomeFirstResponderWebView, object: self)
         return true
     }
 
@@ -248,6 +254,51 @@ final class ChromiumBrowserHostView: NSView {
             return devToolsDividerView
         }
         return super.hitTest(point)
+    }
+
+    private func updateContentFocusEventMonitor() {
+        if window == nil {
+            removeContentFocusEventMonitor()
+            return
+        }
+        guard contentFocusEventMonitor == nil else { return }
+        contentFocusEventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] event in
+            self?.handleContentFocusEvent(event)
+            return event
+        }
+    }
+
+    private func removeContentFocusEventMonitor() {
+        if let contentFocusEventMonitor {
+            NSEvent.removeMonitor(contentFocusEventMonitor)
+            self.contentFocusEventMonitor = nil
+        }
+    }
+
+    private func handleContentFocusEvent(_ event: NSEvent) {
+        guard event.window === window,
+              !isHiddenOrHasHiddenAncestor else {
+            return
+        }
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(point) else { return }
+        if devToolsVisible, devToolsDividerInteractionRect.contains(point) {
+            return
+        }
+
+#if DEBUG
+        let windowNumber = window?.windowNumber ?? -1
+        let firstResponderType = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
+        cmuxDebugLog(
+            "browser.chromium.focus.mouseDown host=\(ObjectIdentifier(self)) " +
+            "win=\(windowNumber) fr=\(firstResponderType)"
+        )
+#endif
+        NotificationCenter.default.post(name: .webViewDidReceiveClick, object: self)
+        _ = window?.makeFirstResponder(self)
+        setBrowserFocused(true)
     }
 
     func load(_ url: URL) {
