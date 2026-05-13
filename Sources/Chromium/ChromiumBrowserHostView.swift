@@ -111,6 +111,7 @@ final class ChromiumBrowserHostView: NSView {
     private static let faviconURLsNotification = Notification.Name("CmuxChromiumFaviconURLsNotification")
     private static let findResultNotification = Notification.Name("CmuxChromiumFindResultNotification")
     private static let contextMenuActionNotification = Notification.Name("CmuxChromiumContextMenuActionNotification")
+    private static let closeRequestNotification = Notification.Name("CmuxChromiumCloseRequestNotification")
     var onReactGrabMessage: (([String: Any]) -> Void)?
     var onNavigationStateChanged: ((ChromiumNavigationState) -> Void)?
     var onPopupRequest: ((URL) -> Void)?
@@ -118,6 +119,7 @@ final class ChromiumBrowserHostView: NSView {
     var onFaviconURLsChanged: (([URL]) -> Void)?
     var onFindResult: ((Int, Int) -> Void)?
     var onContextMenuMoveTabToNewWorkspace: (() -> Bool)?
+    var onCloseRequested: (() -> Void)?
 
     init(initialURL: URL?) {
         pendingURL = initialURL
@@ -739,6 +741,12 @@ final class ChromiumBrowserHostView: NSView {
                     name: Self.contextMenuActionNotification,
                     object: nil
                 )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleCloseRequestNotification(_:)),
+                    name: Self.closeRequestNotification,
+                    object: nil
+                )
             }
             pendingJavaScript.forEach { cmux_chromium_execute_javascript(browserHandle, $0) }
             pendingJavaScript.removeAll()
@@ -759,6 +767,15 @@ final class ChromiumBrowserHostView: NSView {
             browserHandle = nil
             cmux_chromium_dispose_browser(pointer)
         }
+    }
+
+    @objc private func handleCloseRequestNotification(_ notification: Notification) {
+        guard let browserHandle,
+              let notifiedBrowserHandle = notification.userInfo?["browserHandle"] as? NSValue,
+              notifiedBrowserHandle.pointerValue == browserHandle else {
+            return
+        }
+        onCloseRequested?()
     }
 
     @objc private func handlePopupRequestNotification(_ notification: Notification) {

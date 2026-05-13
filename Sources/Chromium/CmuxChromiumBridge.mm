@@ -35,6 +35,7 @@
 static std::string g_last_error;
 static NSString *const CmuxChromiumReactGrabMessageNotification = @"CmuxChromiumReactGrabMessageNotification";
 static NSString *const CmuxChromiumReactGrabMessagePrefix = @"__CMUX_REACT_GRAB__";
+static NSString *const CmuxChromiumWindowCloseMessage = @"__CMUX_WINDOW_CLOSE__";
 static NSString *const CmuxChromiumNavigationStateNotification = @"CmuxChromiumNavigationStateNotification";
 static NSString *const CmuxChromiumBrowserClosedNotification = @"CmuxChromiumBrowserClosedNotification";
 static NSString *const CmuxChromiumPopupRequestNotification = @"CmuxChromiumPopupRequestNotification";
@@ -42,6 +43,7 @@ static NSString *const CmuxChromiumDownloadEventNotification = @"CmuxChromiumDow
 static NSString *const CmuxChromiumFaviconURLsNotification = @"CmuxChromiumFaviconURLsNotification";
 static NSString *const CmuxChromiumFindResultNotification = @"CmuxChromiumFindResultNotification";
 static NSString *const CmuxChromiumContextMenuActionNotification = @"CmuxChromiumContextMenuActionNotification";
+static NSString *const CmuxChromiumCloseRequestNotification = @"CmuxChromiumCloseRequestNotification";
 static const int CmuxChromiumMenuOpenLinkInNewTab = MENU_ID_USER_FIRST + 1;
 static const int CmuxChromiumMenuOpenLinkInDefaultBrowser = MENU_ID_USER_FIRST + 2;
 static const int CmuxChromiumMenuDownloadLinkedFile = MENU_ID_USER_FIRST + 3;
@@ -244,6 +246,7 @@ static NSRect CmuxChromiumPopupContentRect(
 - (instancetype)initWithURL:(NSString *)url popupFeatures:(const cef_popup_features_t *)popupFeatures openerView:(NSView *)openerView;
 - (void)setBrowserHandle:(void *)browserHandle;
 - (void)browserDidClose;
+- (void)closePopup;
 - (void)updateURL:(NSString *)url;
 - (void)updateTitle:(NSString *)title;
 @end
@@ -332,6 +335,10 @@ static char CmuxChromiumPopupAssociatedObjectKey;
     if (_panel.visible) {
         [_panel close];
     }
+}
+
+- (void)closePopup {
+    [_panel performClose:nil];
 }
 
 - (void)updateURL:(NSString *)url {
@@ -622,6 +629,33 @@ static void CmuxChromiumPostContextMenuAction(cmux_chromium_client_t *client, NS
                                                           object:nil
                                                         userInfo:userInfo];
     });
+}
+
+static void CmuxChromiumPostCloseRequest(cmux_chromium_client_t *client) {
+    if (!client || !client->browser_handle) return;
+    NSValue *browserHandle = [NSValue valueWithPointer:client->browser_handle];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumCloseRequestNotification
+                                                          object:nil
+                                                        userInfo:@{ @"browserHandle": browserHandle }];
+    });
+}
+
+static void CmuxChromiumInstallWindowCloseBridge(cef_frame_t *frame) {
+    if (!frame || !frame->is_main(frame)) return;
+    static const char *script =
+        "(function(){"
+        "if(window.__CMUX_WINDOW_CLOSE_BRIDGE_INSTALLED__)return;"
+        "Object.defineProperty(window,'__CMUX_WINDOW_CLOSE_BRIDGE_INSTALLED__',{value:true});"
+        "Object.defineProperty(window,'close',{value:function(){console.info('__CMUX_WINDOW_CLOSE__');},configurable:true});"
+        "})();";
+    cef_string_t cef_code = {};
+    cef_string_t cef_url = {};
+    cef_string_from_utf8(script, strlen(script), &cef_code);
+    cef_string_from_utf8("cmux://window-close", strlen("cmux://window-close"), &cef_url);
+    frame->execute_java_script(frame, &cef_code, &cef_url, 1);
+    cef_string_clear(&cef_code);
+    cef_string_clear(&cef_url);
 }
 
 static void CmuxChromiumStartDownload(cef_browser_t *browser, NSString *url) {
@@ -1080,6 +1114,15 @@ static int CEF_CALLBACK OnConsoleMessage(
     if ([text hasPrefix:CmuxChromiumReactGrabMessagePrefix]) {
         notificationName = CmuxChromiumReactGrabMessageNotification;
         payload = [text substringFromIndex:CmuxChromiumReactGrabMessagePrefix.length];
+    } else if ([text isEqualToString:CmuxChromiumWindowCloseMessage]) {
+        if (client->popup_controller) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [client->popup_controller closePopup];
+            });
+        } else {
+            CmuxChromiumPostCloseRequest(client);
+        }
+        return 1;
     } else {
         return 0;
     }
@@ -1095,6 +1138,15 @@ static int CEF_CALLBACK OnConsoleMessage(
                                                         }];
     });
     return 1;
+}
+
+static void CEF_CALLBACK OnLoadStart(
+    cef_load_handler_t *self,
+    cef_browser_t *browser,
+    cef_frame_t *frame,
+    cef_transition_type_t transition_type
+) {
+    CmuxChromiumInstallWindowCloseBridge(frame);
 }
 
 static void PostNavigationState(cmux_chromium_client_t *client, cef_browser_t *browser, NSDictionary *changes) {
@@ -1508,6 +1560,7 @@ static cmux_chromium_client_t *CreateClient(void) {
     client->display_handler.on_favicon_urlchange = OnFaviconURLChange;
     client->display_handler.on_fullscreen_mode_change = OnFullscreenModeChange;
     client->display_handler.on_console_message = OnConsoleMessage;
+    client->load_handler.on_load_start = OnLoadStart;
     client->load_handler.on_loading_state_change = OnLoadingStateChange;
     client->request_handler.on_open_urlfrom_tab = OnOpenURLFromTab;
     client->download_handler.can_download = CanDownload;

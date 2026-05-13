@@ -180,6 +180,9 @@ extension BrowserPanel {
             chromiumHostView.onFindResult = { [weak self] count, activeMatchOrdinal in
                 self?.applyChromiumFindResult(count: count, activeMatchOrdinal: activeMatchOrdinal)
             }
+            chromiumHostView.onCloseRequested = { [weak self] in
+                self?.webViewDidRequestClose?()
+            }
             chromiumHostView.onContextMenuMoveTabToNewWorkspace = { [weak self] in
                 guard let self else { return false }
                 return AppDelegate.shared?.moveSurfaceToNewWorkspace(
@@ -209,6 +212,9 @@ extension BrowserPanel {
         }
         view.onFindResult = { [weak self] count, activeMatchOrdinal in
             self?.applyChromiumFindResult(count: count, activeMatchOrdinal: activeMatchOrdinal)
+        }
+        view.onCloseRequested = { [weak self] in
+            self?.webViewDidRequestClose?()
         }
         view.onContextMenuMoveTabToNewWorkspace = { [weak self] in
             guard let self else { return false }
