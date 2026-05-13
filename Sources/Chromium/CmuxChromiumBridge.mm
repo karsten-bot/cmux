@@ -177,6 +177,7 @@ typedef struct cmux_chromium_browser_t {
     NSView *__unsafe_unretained parent_view;
     cef_browser_t *browser;
     cmux_chromium_client_t *client;
+    CFTypeRef notification_object;
     NSRect last_sent_bounds;
     BOOL has_sent_bounds;
     struct cmux_chromium_browser_t *opener_handle;
@@ -194,7 +195,23 @@ typedef struct cmux_chromium_navigation_entry_visitor_t {
 } cmux_chromium_navigation_entry_visitor_t;
 
 static cmux_chromium_browser_t *CreateBrowserHandle(void) {
-    return new cmux_chromium_browser_t();
+    auto *handle = new cmux_chromium_browser_t();
+    handle->notification_object = CFBridgingRetain([NSValue valueWithPointer:handle]);
+    return handle;
+}
+
+static void DeleteBrowserHandle(cmux_chromium_browser_t *handle) {
+    if (!handle) return;
+    if (handle->notification_object) {
+        CFRelease(handle->notification_object);
+        handle->notification_object = nullptr;
+    }
+    delete handle;
+}
+
+static id CmuxChromiumNotificationObject(cmux_chromium_browser_t *handle) {
+    if (!handle || !handle->notification_object) return nil;
+    return (__bridge id)handle->notification_object;
 }
 
 typedef struct {
@@ -601,12 +618,15 @@ static void CmuxChromiumPostPopupRequest(
     BOOL popupFeaturesWereSpecified,
     NSString *openerURL
 ) {
+    cmux_chromium_browser_t *browserHandle = client ? client->browser_handle : nullptr;
+    if (!browserHandle) return;
+    id notificationObject = CmuxChromiumNotificationObject(browserHandle);
+    NSValue *browserHandleValue = [NSValue valueWithPointer:browserHandle];
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!client->browser_handle) return;
         [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumPopupRequestNotification
-                                                          object:nil
+                                                          object:notificationObject
                                                         userInfo:@{
-                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"browserHandle": browserHandleValue,
                                                             @"url": url ?: @"",
                                                             @"userGesture": @(userGesture),
                                                             @"popupFeaturesWereSpecified": @(popupFeaturesWereSpecified),
@@ -616,17 +636,19 @@ static void CmuxChromiumPostPopupRequest(
 }
 
 static void CmuxChromiumPostContextMenuAction(cmux_chromium_client_t *client, NSString *action, NSDictionary *extraUserInfo) {
+    cmux_chromium_browser_t *browserHandle = client ? client->browser_handle : nullptr;
+    if (!browserHandle) return;
+    id notificationObject = CmuxChromiumNotificationObject(browserHandle);
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!client->browser_handle) return;
         NSMutableDictionary *userInfo = [@{
-            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+            @"browserHandle": [NSValue valueWithPointer:browserHandle],
             @"action": action ?: @""
         } mutableCopy];
         if (extraUserInfo) {
             [userInfo addEntriesFromDictionary:extraUserInfo];
         }
         [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumContextMenuActionNotification
-                                                          object:nil
+                                                          object:notificationObject
                                                         userInfo:userInfo];
     });
 }
@@ -634,9 +656,10 @@ static void CmuxChromiumPostContextMenuAction(cmux_chromium_client_t *client, NS
 static void CmuxChromiumPostCloseRequest(cmux_chromium_client_t *client) {
     if (!client || !client->browser_handle) return;
     NSValue *browserHandle = [NSValue valueWithPointer:client->browser_handle];
+    id notificationObject = CmuxChromiumNotificationObject(client->browser_handle);
     dispatch_async(dispatch_get_main_queue(), ^{
         [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumCloseRequestNotification
-                                                          object:nil
+                                                          object:notificationObject
                                                         userInfo:@{ @"browserHandle": browserHandle }];
     });
 }
@@ -1007,11 +1030,12 @@ static void CEF_CALLBACK OnBeforeClose(cef_life_span_handler_t *self, cef_browse
     browser->base.release(&browser->base);
     if (handle) {
         if (handle->dispose_when_closed) {
-            delete handle;
+            DeleteBrowserHandle(handle);
         } else {
+            id notificationObject = CmuxChromiumNotificationObject(handle);
             dispatch_async(dispatch_get_main_queue(), ^{
                 [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumBrowserClosedNotification
-                                                                  object:nil
+                                                                  object:notificationObject
                                                                 userInfo:@{ @"browserHandle": [NSValue valueWithPointer:handle] }];
             });
         }
@@ -1129,9 +1153,10 @@ static int CEF_CALLBACK OnConsoleMessage(
 
     cmux_chromium_browser_t *browser_handle = client->browser_handle;
     if (!browser_handle) return 0;
+    id notificationObject = CmuxChromiumNotificationObject(browser_handle);
     dispatch_async(dispatch_get_main_queue(), ^{
         [NSNotificationCenter.defaultCenter postNotificationName:notificationName
-                                                          object:nil
+                                                          object:notificationObject
                                                         userInfo:@{
                                                             @"browserHandle": [NSValue valueWithPointer:browser_handle],
                                                             @"payload": payload
@@ -1151,13 +1176,14 @@ static void CEF_CALLBACK OnLoadStart(
 
 static void PostNavigationState(cmux_chromium_client_t *client, cef_browser_t *browser, NSDictionary *changes) {
     if (!client || !client->browser_handle || !browser) return;
+    id notificationObject = CmuxChromiumNotificationObject(client->browser_handle);
     NSMutableDictionary *payload = [NSMutableDictionary dictionaryWithDictionary:changes ?: @{}];
     payload[@"browserHandle"] = [NSValue valueWithPointer:client->browser_handle];
     payload[@"canGoBack"] = @(browser->can_go_back(browser) ? YES : NO);
     payload[@"canGoForward"] = @(browser->can_go_forward(browser) ? YES : NO);
     dispatch_async(dispatch_get_main_queue(), ^{
         [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumNavigationStateNotification
-                                                          object:nil
+                                                          object:notificationObject
                                                         userInfo:payload];
     });
 }
@@ -1192,9 +1218,10 @@ static void CmuxChromiumPostNavigationEntries(cmux_chromium_navigation_entry_vis
     }
 
     NSValue *browserHandle = [NSValue valueWithPointer:visitor->client->browser_handle];
+    id notificationObject = CmuxChromiumNotificationObject(visitor->client->browser_handle);
     dispatch_async(dispatch_get_main_queue(), ^{
         [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumNavigationStateNotification
-                                                          object:nil
+                                                          object:notificationObject
                                                         userInfo:@{
                                                             @"browserHandle": browserHandle,
                                                             @"backHistoryURLStrings": backHistoryURLStrings,
@@ -1253,7 +1280,6 @@ static void CEF_CALLBACK OnAddressChange(
     if (frame && !frame->is_main(frame)) return;
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, display_handler));
     PostNavigationState(client, browser, @{ @"url": NSStringFromCefString(url) });
-    CmuxChromiumRefreshNavigationEntries(client, browser);
     [client->popup_controller updateURL:NSStringFromCefString(url)];
 }
 
@@ -1285,12 +1311,14 @@ static void CEF_CALLBACK OnFaviconURLChange(
         }
     }
 
+    cmux_chromium_browser_t *browserHandle = client->browser_handle;
+    if (!browserHandle) return;
+    id notificationObject = CmuxChromiumNotificationObject(browserHandle);
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!client->browser_handle) return;
         [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumFaviconURLsNotification
-                                                          object:nil
+                                                          object:notificationObject
                                                         userInfo:@{
-                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"browserHandle": [NSValue valueWithPointer:browserHandle],
                                                             @"urls": urls
                                                         }];
     });
@@ -1318,9 +1346,6 @@ static void CEF_CALLBACK OnLoadingStateChange(
         @"canGoBack": @(can_go_back ? YES : NO),
         @"canGoForward": @(can_go_forward ? YES : NO)
     });
-    if (!is_loading) {
-        CmuxChromiumRefreshNavigationEntries(client, browser);
-    }
 }
 
 static int CEF_CALLBACK CanDownload(
@@ -1343,12 +1368,14 @@ static int CEF_CALLBACK OnBeforeDownload(
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, download_handler));
     NSString *filename = NSStringFromCefString(suggested_name);
     uint32_t download_id = download_item && download_item->get_id ? download_item->get_id(download_item) : 0;
+    cmux_chromium_browser_t *browserHandle = client->browser_handle;
+    if (!browserHandle) return 0;
+    id notificationObject = CmuxChromiumNotificationObject(browserHandle);
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!client->browser_handle) return;
         [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumDownloadEventNotification
-                                                          object:nil
+                                                          object:notificationObject
                                                         userInfo:@{
-                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"browserHandle": [NSValue valueWithPointer:browserHandle],
                                                             @"status": @"started",
                                                             @"filename": filename,
                                                             @"id": @(download_id)
@@ -1389,13 +1416,15 @@ static void CEF_CALLBACK OnDownloadUpdated(
     int64_t received_bytes = download_item->get_received_bytes ? download_item->get_received_bytes(download_item) : 0;
     int64_t total_bytes = download_item->get_total_bytes ? download_item->get_total_bytes(download_item) : 0;
     uint32_t download_id = download_item->get_id ? download_item->get_id(download_item) : 0;
+    cmux_chromium_browser_t *browserHandle = client->browser_handle;
+    if (!browserHandle) return;
+    id notificationObject = CmuxChromiumNotificationObject(browserHandle);
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!client->browser_handle) return;
         [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumDownloadEventNotification
-                                                          object:nil
+                                                          object:notificationObject
                                                         userInfo:@{
-                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"browserHandle": [NSValue valueWithPointer:browserHandle],
                                                             @"status": status,
                                                             @"filename": filename,
                                                             @"url": url,
@@ -1473,12 +1502,14 @@ static void CEF_CALLBACK OnFindResult(
     int finalUpdate
 ) {
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, find_handler));
+    cmux_chromium_browser_t *browserHandle = client->browser_handle;
+    if (!browserHandle) return;
+    id notificationObject = CmuxChromiumNotificationObject(browserHandle);
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!client->browser_handle) return;
         [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumFindResultNotification
-                                                          object:nil
+                                                          object:notificationObject
                                                         userInfo:@{
-                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"browserHandle": [NSValue valueWithPointer:browserHandle],
                                                             @"identifier": @(identifier),
                                                             @"count": @(count),
                                                             @"activeMatchOrdinal": @(activeMatchOrdinal),
@@ -1696,6 +1727,10 @@ NSView *cmux_chromium_browser_view(void *browserHandle) {
     return (__bridge NSView *)window_handle;
 }
 
+id cmux_chromium_notification_object(void *browserHandle) {
+    return CmuxChromiumNotificationObject((cmux_chromium_browser_t *)browserHandle);
+}
+
 static NSView *AttachBrowserView(cmux_chromium_browser_t *handle) {
     if (!handle || !handle->parent_view) return nil;
     NSView *browserView = cmux_chromium_browser_view(handle);
@@ -1749,7 +1784,7 @@ void cmux_chromium_dispose_browser(void *browserHandle) {
     if (!handle) return;
 
     if (!handle->browser) {
-        delete handle;
+        DeleteBrowserHandle(handle);
         return;
     }
 

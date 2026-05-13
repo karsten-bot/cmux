@@ -29,6 +29,7 @@ BOOL cmux_chromium_has_dev_tools(void *browserHandle);
 void cmux_chromium_show_dev_tools(void *browserHandle);
 void cmux_chromium_close_dev_tools(void *browserHandle);
 NSView * _Nullable cmux_chromium_browser_view(void *browserHandle);
+id _Nullable cmux_chromium_notification_object(void *browserHandle);
 
 #ifdef __cplusplus
 }

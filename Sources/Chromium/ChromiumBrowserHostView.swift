@@ -88,7 +88,8 @@ final class ChromiumBrowserHostView: NSView {
     private var devToolsDividerEventMonitor: Any?
     private var devToolsDividerTrackingArea: NSTrackingArea?
     private var pendingJavaScript: [String] = []
-    private var isObservingBrowserNotifications = false
+    private var browserNotificationObject: AnyObject?
+    private var devToolsBrowserNotificationObject: AnyObject?
     private let pageContainerView = NSView(frame: .zero)
     private let devToolsContainerView = NSView(frame: .zero)
     private lazy var devToolsDividerView = DevToolsDividerView(hostView: self)
@@ -443,7 +444,10 @@ final class ChromiumBrowserHostView: NSView {
                     self.devToolsContainerView,
                     devToolsURL.absoluteString
                 )
-                if self.devToolsBrowserHandle == nil {
+                if let devToolsBrowserHandle = self.devToolsBrowserHandle {
+                    self.devToolsBrowserNotificationObject = cmux_chromium_notification_object(devToolsBrowserHandle) as AnyObject?
+                    self.observeBrowserNotifications(for: self.devToolsBrowserNotificationObject)
+                } else {
                     #if DEBUG
                     let message = String(cString: cmux_chromium_last_error())
                     cmuxDebugLog("browser.chromium.devtools.create.failed \(message)")
@@ -470,6 +474,8 @@ final class ChromiumBrowserHostView: NSView {
     func closeDeveloperTools() {
         hideDeveloperToolsChrome()
         if let devToolsBrowserHandle {
+            stopObservingBrowserNotifications(for: devToolsBrowserNotificationObject)
+            devToolsBrowserNotificationObject = nil
             self.devToolsBrowserHandle = nil
             cmux_chromium_dispose_browser(devToolsBrowserHandle)
         }
@@ -691,66 +697,42 @@ final class ChromiumBrowserHostView: NSView {
             #endif
         } else if let browserHandle {
             cmux_chromium_set_zoom_level(browserHandle, Self.chromiumZoomLevel(for: pageZoomFactor))
-            if !isObservingBrowserNotifications {
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(handleReactGrabMessageNotification(_:)),
-                    name: Self.reactGrabMessageNotification,
-                    object: nil
-                )
-                isObservingBrowserNotifications = true
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(handleNavigationStateNotification(_:)),
-                    name: Self.navigationStateNotification,
-                    object: nil
-                )
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(handleBrowserClosedNotification(_:)),
-                    name: Self.browserClosedNotification,
-                    object: nil
-                )
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(handlePopupRequestNotification(_:)),
-                    name: Self.popupRequestNotification,
-                    object: nil
-                )
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(handleDownloadEventNotification(_:)),
-                    name: Self.downloadEventNotification,
-                    object: nil
-                )
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(handleFaviconURLsNotification(_:)),
-                    name: Self.faviconURLsNotification,
-                    object: nil
-                )
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(handleFindResultNotification(_:)),
-                    name: Self.findResultNotification,
-                    object: nil
-                )
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(handleContextMenuActionNotification(_:)),
-                    name: Self.contextMenuActionNotification,
-                    object: nil
-                )
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(handleCloseRequestNotification(_:)),
-                    name: Self.closeRequestNotification,
-                    object: nil
-                )
-            }
+            browserNotificationObject = cmux_chromium_notification_object(browserHandle) as AnyObject?
+            observeBrowserNotifications(for: browserNotificationObject)
             pendingJavaScript.forEach { cmux_chromium_execute_javascript(browserHandle, $0) }
             pendingJavaScript.removeAll()
         }
+    }
+
+    private func observeBrowserNotifications(for object: AnyObject?) {
+        guard let object else { return }
+        for (name, selector) in browserNotificationHandlers {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: selector,
+                name: name,
+                object: object
+            )
+        }
+    }
+
+    private func stopObservingBrowserNotifications(for object: AnyObject?) {
+        guard let object else { return }
+        NotificationCenter.default.removeObserver(self, name: nil, object: object)
+    }
+
+    private var browserNotificationHandlers: [(Notification.Name, Selector)] {
+        [
+            (Self.reactGrabMessageNotification, #selector(handleReactGrabMessageNotification(_:))),
+            (Self.navigationStateNotification, #selector(handleNavigationStateNotification(_:))),
+            (Self.browserClosedNotification, #selector(handleBrowserClosedNotification(_:))),
+            (Self.popupRequestNotification, #selector(handlePopupRequestNotification(_:))),
+            (Self.downloadEventNotification, #selector(handleDownloadEventNotification(_:))),
+            (Self.faviconURLsNotification, #selector(handleFaviconURLsNotification(_:))),
+            (Self.findResultNotification, #selector(handleFindResultNotification(_:))),
+            (Self.contextMenuActionNotification, #selector(handleContextMenuActionNotification(_:))),
+            (Self.closeRequestNotification, #selector(handleCloseRequestNotification(_:))),
+        ]
     }
 
     @objc private func handleBrowserClosedNotification(_ notification: Notification) {
@@ -760,10 +742,14 @@ final class ChromiumBrowserHostView: NSView {
 
         guard let pointer = closedBrowserHandle.pointerValue else { return }
         if pointer == devToolsBrowserHandle {
+            stopObservingBrowserNotifications(for: devToolsBrowserNotificationObject)
+            devToolsBrowserNotificationObject = nil
             devToolsBrowserHandle = nil
             hideDeveloperToolsChrome()
             cmux_chromium_dispose_browser(pointer)
         } else if pointer == browserHandle {
+            stopObservingBrowserNotifications(for: browserNotificationObject)
+            browserNotificationObject = nil
             browserHandle = nil
             cmux_chromium_dispose_browser(pointer)
         }
