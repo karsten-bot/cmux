@@ -1,5 +1,14 @@
 import AppKit
 
+@objc(CmuxChromiumNavigationPolicy)
+final class CmuxChromiumNavigationPolicy: NSObject {
+    @objc(shouldOpenURLExternally:)
+    static func shouldOpenURLExternally(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString) else { return false }
+        return browserShouldOpenURLExternally(url)
+    }
+}
+
 extension BrowserPanel {
     var usesChromiumEngine: Bool {
         browserEngine == .chromium

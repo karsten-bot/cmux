@@ -3,14 +3,17 @@
 
 #import "CmuxChromiumBridge.h"
 
+#import <objc/message.h>
 #import <objc/runtime.h>
 
 #include <dispatch/dispatch.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <algorithm>
 #include <string>
 #include <string.h>
+#include <vector>
 
 #include "include/capi/cef_app_capi.h"
 #include "include/capi/cef_browser_capi.h"
@@ -22,6 +25,7 @@
 #include "include/capi/cef_life_span_handler_capi.h"
 #include "include/capi/cef_load_handler_capi.h"
 #include "include/capi/cef_permission_handler_capi.h"
+#include "include/capi/cef_request_handler_capi.h"
 #include "include/cef_api_hash.h"
 #include "include/cef_application_mac.h"
 #include "libcef_dll/wrapper/libcef_dll_dylib.cc"
@@ -40,6 +44,8 @@ static NSTimer *g_scheduled_message_loop_timer = nil;
 static BOOL g_message_loop_working = NO;
 static BOOL g_message_loop_reentrant = NO;
 static char **g_argv = nullptr;
+
+@class CmuxChromiumPopupWindowController;
 
 static NSString *CmuxChromiumFrameworkPath(void) {
     NSURL *frameworksURL = NSBundle.mainBundle.privateFrameworksURL;
@@ -122,15 +128,24 @@ static void CmuxInstallChromiumEventBridge(void) {
     });
 }
 
-typedef struct {
+typedef struct cmux_chromium_client_t {
     cef_client_t client;
     cef_life_span_handler_t life_span_handler;
     cef_display_handler_t display_handler;
     cef_load_handler_t load_handler;
+    cef_request_handler_t request_handler;
     cef_download_handler_t download_handler;
     cef_permission_handler_t permission_handler;
     cef_find_handler_t find_handler;
     struct cmux_chromium_browser_t *browser_handle;
+    CmuxChromiumPopupWindowController *__unsafe_unretained popup_controller;
+    CmuxChromiumPopupWindowController *__unsafe_unretained pending_popup_controller;
+    NSView *__unsafe_unretained pending_popup_parent_view;
+    struct cmux_chromium_browser_t *pending_popup_opener_handle;
+    int pending_popup_id;
+    CmuxChromiumPopupWindowController *__unsafe_unretained allowed_popup_controller;
+    struct cmux_chromium_client_t *allowed_popup_client;
+    int allowed_popup_id;
 } cmux_chromium_client_t;
 
 typedef struct cmux_chromium_browser_t {
@@ -139,14 +154,173 @@ typedef struct cmux_chromium_browser_t {
     cmux_chromium_client_t *client;
     NSRect last_sent_bounds;
     BOOL has_sent_bounds;
+    struct cmux_chromium_browser_t *opener_handle;
+    std::vector<struct cmux_chromium_browser_t *> child_popups;
     BOOL is_closing;
     BOOL dispose_when_closed;
 } cmux_chromium_browser_t;
+
+static cmux_chromium_browser_t *CreateBrowserHandle(void) {
+    return new cmux_chromium_browser_t();
+}
 
 typedef struct {
     cef_app_t app;
     cef_browser_process_handler_t browser_process_handler;
 } cmux_chromium_app_t;
+
+static NSRect CmuxChromiumPopupContentRect(
+    CGFloat requestedWidth,
+    CGFloat requestedHeight,
+    BOOL hasRequestedX,
+    CGFloat requestedX,
+    BOOL hasRequestedTopY,
+    CGFloat requestedTopY,
+    NSRect visibleFrame
+) {
+    CGFloat minWidth = 200;
+    CGFloat minHeight = 150;
+    CGFloat width = MIN(MAX(requestedWidth > 0 ? requestedWidth : 800, minWidth), visibleFrame.size.width);
+    CGFloat height = MIN(MAX(requestedHeight > 0 ? requestedHeight : 600, minHeight), visibleFrame.size.height);
+
+    CGFloat x = visibleFrame.origin.x + (visibleFrame.size.width - width) / 2;
+    CGFloat y = visibleFrame.origin.y + (visibleFrame.size.height - height) / 2;
+    if (hasRequestedX && hasRequestedTopY) {
+        x = MAX(visibleFrame.origin.x, MIN(requestedX, NSMaxX(visibleFrame) - width));
+        CGFloat appKitY = NSMaxY(visibleFrame) - requestedTopY - height;
+        y = MAX(visibleFrame.origin.y, MIN(appKitY, NSMaxY(visibleFrame) - height));
+    }
+
+    return NSMakeRect(x, y, width, height);
+}
+
+@interface CmuxChromiumPopupPanel : NSPanel
+@end
+
+@implementation CmuxChromiumPopupPanel
+- (BOOL)performKeyEquivalent:(NSEvent *)event {
+    NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    if (flags == NSEventModifierFlagCommand && [event.charactersIgnoringModifiers.lowercaseString isEqualToString:@"w"]) {
+        [self performClose:nil];
+        return YES;
+    }
+    return [super performKeyEquivalent:event];
+}
+@end
+
+@interface CmuxChromiumPopupWindowController : NSObject <NSWindowDelegate>
+@property(nonatomic, readonly) NSView *parentView;
+- (instancetype)initWithURL:(NSString *)url popupFeatures:(const cef_popup_features_t *)popupFeatures openerView:(NSView *)openerView;
+- (void)setBrowserHandle:(void *)browserHandle;
+- (void)browserDidClose;
+- (void)updateURL:(NSString *)url;
+- (void)updateTitle:(NSString *)title;
+@end
+
+@implementation CmuxChromiumPopupWindowController {
+    CmuxChromiumPopupPanel *_panel;
+    NSTextField *_urlLabel;
+    NSView *_parentView;
+    void *_browserHandle;
+    BOOL _browserDidClose;
+}
+
+static char CmuxChromiumPopupAssociatedObjectKey;
+
+- (instancetype)initWithURL:(NSString *)url popupFeatures:(const cef_popup_features_t *)popupFeatures openerView:(NSView *)openerView {
+    self = [super init];
+    if (!self) return nil;
+
+    NSScreen *screen = openerView.window.screen ?: NSScreen.mainScreen ?: NSScreen.screens.firstObject;
+    NSRect visibleFrame = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1440, 900);
+    CGFloat requestedWidth = popupFeatures && popupFeatures->widthSet ? popupFeatures->width : 800;
+    CGFloat requestedHeight = popupFeatures && popupFeatures->heightSet ? popupFeatures->height : 600;
+    NSRect contentRect = CmuxChromiumPopupContentRect(
+        requestedWidth,
+        requestedHeight,
+        popupFeatures && popupFeatures->xSet,
+        popupFeatures ? popupFeatures->x : 0,
+        popupFeatures && popupFeatures->ySet,
+        popupFeatures ? popupFeatures->y : 0,
+        visibleFrame
+    );
+
+    NSWindowStyleMask styleMask = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
+    _panel = [[CmuxChromiumPopupPanel alloc] initWithContentRect:contentRect styleMask:styleMask backing:NSBackingStoreBuffered defer:NO];
+    _panel.identifier = @"cmux.browser-popup";
+    _panel.level = NSNormalWindowLevel;
+    _panel.hidesOnDeactivate = NO;
+    _panel.releasedWhenClosed = NO;
+    _panel.minSize = NSMakeSize(200, 150);
+    _panel.title = url.length > 0 ? url : @"";
+    _panel.delegate = self;
+
+    NSView *containerView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, contentRect.size.width, contentRect.size.height)];
+    containerView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    _urlLabel = [NSTextField labelWithString:url ?: @""];
+    _urlLabel.font = [NSFont systemFontOfSize:11];
+    _urlLabel.textColor = NSColor.secondaryLabelColor;
+    _urlLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _urlLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _parentView = [[NSView alloc] initWithFrame:NSZeroRect];
+    _parentView.translatesAutoresizingMaskIntoConstraints = NO;
+    _parentView.wantsLayer = YES;
+    _parentView.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
+
+    [containerView addSubview:_urlLabel];
+    [containerView addSubview:_parentView];
+    _panel.contentView = containerView;
+    [NSLayoutConstraint activateConstraints:@[
+        [_urlLabel.topAnchor constraintEqualToAnchor:containerView.topAnchor constant:4],
+        [_urlLabel.leadingAnchor constraintEqualToAnchor:containerView.leadingAnchor constant:8],
+        [_urlLabel.trailingAnchor constraintEqualToAnchor:containerView.trailingAnchor constant:-8],
+        [_urlLabel.heightAnchor constraintEqualToConstant:16],
+        [_parentView.topAnchor constraintEqualToAnchor:_urlLabel.bottomAnchor constant:2],
+        [_parentView.leadingAnchor constraintEqualToAnchor:containerView.leadingAnchor],
+        [_parentView.trailingAnchor constraintEqualToAnchor:containerView.trailingAnchor],
+        [_parentView.bottomAnchor constraintEqualToAnchor:containerView.bottomAnchor],
+    ]];
+
+    objc_setAssociatedObject(_panel, &CmuxChromiumPopupAssociatedObjectKey, self, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [_panel makeKeyAndOrderFront:self];
+    return self;
+}
+
+- (NSView *)parentView {
+    return _parentView;
+}
+
+- (void)setBrowserHandle:(void *)browserHandle {
+    _browserHandle = browserHandle;
+}
+
+- (void)browserDidClose {
+    _browserDidClose = YES;
+    _browserHandle = nullptr;
+    if (_panel.visible) {
+        [_panel close];
+    }
+}
+
+- (void)updateURL:(NSString *)url {
+    _urlLabel.stringValue = url ?: @"";
+}
+
+- (void)updateTitle:(NSString *)title {
+    if (title.length > 0) {
+        _panel.title = title;
+    }
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    if (!_browserDidClose && _browserHandle) {
+        cmux_chromium_close_browser(_browserHandle);
+    }
+    _browserHandle = nullptr;
+    objc_setAssociatedObject(_panel, &CmuxChromiumPopupAssociatedObjectKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+@end
 
 static void CEF_CALLBACK NoopAddRef(cef_base_ref_counted_t *self) {}
 static int CEF_CALLBACK NoopRelease(cef_base_ref_counted_t *self) { return 0; }
@@ -161,6 +335,8 @@ static void InitBase(cef_base_ref_counted_t *base, size_t size) {
     base->has_one_ref = NoopHasOneRef;
     base->has_at_least_one_ref = NoopHasAtLeastOneRef;
 }
+
+static cmux_chromium_client_t *CreateClient(void);
 
 static void AppendSwitch(cef_command_line_t *command_line, const char *name) {
     cef_string_t cef_name = {};
@@ -307,6 +483,11 @@ static cef_load_handler_t *CEF_CALLBACK GetLoadHandler(cef_client_t *self) {
     return &client->load_handler;
 }
 
+static cef_request_handler_t *CEF_CALLBACK GetRequestHandler(cef_client_t *self) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)self;
+    return &client->request_handler;
+}
+
 static cef_download_handler_t *CEF_CALLBACK GetDownloadHandler(cef_client_t *self) {
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)self;
     return &client->download_handler;
@@ -322,20 +503,136 @@ static cef_find_handler_t *CEF_CALLBACK GetFindHandler(cef_client_t *self) {
     return &client->find_handler;
 }
 
+static BOOL CmuxChromiumPopupFeaturesWereSpecified(const cef_popup_features_t *popupFeatures) {
+    return popupFeatures &&
+        (popupFeatures->xSet || popupFeatures->ySet || popupFeatures->widthSet || popupFeatures->heightSet || popupFeatures->isPopup);
+}
+
+static BOOL CmuxChromiumShouldOpenURLExternally(NSString *urlString) {
+    Class policyClass = NSClassFromString(@"CmuxChromiumNavigationPolicy");
+    SEL selector = @selector(shouldOpenURLExternally:);
+    if (!policyClass || ![policyClass respondsToSelector:selector]) return NO;
+    BOOL (*send)(id, SEL, NSString *) = (BOOL (*)(id, SEL, NSString *))objc_msgSend;
+    return send(policyClass, selector, urlString ?: @"");
+}
+
+static NSString *CmuxChromiumBrowserURL(cef_browser_t *browser) {
+    if (!browser) return @"";
+    cef_frame_t *frame = browser->get_main_frame(browser);
+    if (!frame) return @"";
+    cef_string_userfree_t frame_url = frame->get_url(frame);
+    NSString *url = NSStringFromCefString(frame_url);
+    cef_string_userfree_free(frame_url);
+    frame->base.release(&frame->base);
+    return url ?: @"";
+}
+
+static void CmuxChromiumPostPopupRequest(
+    cmux_chromium_client_t *client,
+    NSString *url,
+    BOOL userGesture,
+    BOOL popupFeaturesWereSpecified,
+    NSString *openerURL
+) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!client->browser_handle) return;
+        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumPopupRequestNotification
+                                                          object:nil
+                                                        userInfo:@{
+                                                            @"browserHandle": [NSValue valueWithPointer:client->browser_handle],
+                                                            @"url": url ?: @"",
+                                                            @"userGesture": @(userGesture),
+                                                            @"popupFeaturesWereSpecified": @(popupFeaturesWereSpecified),
+                                                            @"openerURL": openerURL ?: @""
+                                                        }];
+    });
+}
+
+static BOOL CmuxChromiumDispositionOpensTab(cef_window_open_disposition_t disposition) {
+    switch (disposition) {
+    case CEF_WOD_SINGLETON_TAB:
+    case CEF_WOD_NEW_FOREGROUND_TAB:
+    case CEF_WOD_NEW_BACKGROUND_TAB:
+    case CEF_WOD_NEW_WINDOW:
+    case CEF_WOD_SWITCH_TO_TAB:
+        return YES;
+    default:
+        return NO;
+    }
+}
+
+static void CmuxChromiumDetachChildPopup(cmux_chromium_browser_t *child) {
+    if (!child || !child->opener_handle) return;
+    auto &children = child->opener_handle->child_popups;
+    children.erase(std::remove(children.begin(), children.end(), child), children.end());
+    child->opener_handle = nullptr;
+}
+
+static void CmuxChromiumClearAllowedPopup(cmux_chromium_client_t *client, int popup_id, BOOL closePanel) {
+    if (!client || !client->allowed_popup_client || client->allowed_popup_id != popup_id) return;
+    if (closePanel) {
+        [client->allowed_popup_controller browserDidClose];
+    }
+    if (!client->allowed_popup_client->browser_handle) {
+        free(client->allowed_popup_client);
+    }
+    client->allowed_popup_controller = nil;
+    client->allowed_popup_client = nullptr;
+    client->allowed_popup_id = 0;
+}
+
+static int CEF_CALLBACK OnOpenURLFromTab(
+    cef_request_handler_t *self,
+    cef_browser_t *browser,
+    cef_frame_t *frame,
+    const cef_string_t *target_url,
+    cef_window_open_disposition_t target_disposition,
+    int user_gesture
+) {
+    if (!browser || !target_url || !target_url->str || target_url->length == 0) return 0;
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, request_handler));
+    NSString *url = NSStringFromCefString(target_url);
+
+    if (CmuxChromiumDispositionOpensTab(target_disposition)) {
+        CmuxChromiumPostPopupRequest(
+            client,
+            url,
+            user_gesture ? YES : NO,
+            NO,
+            CmuxChromiumBrowserURL(browser)
+        );
+        return 1;
+    }
+
+    return 0;
+}
+
 static void CEF_CALLBACK OnBeforeClose(cef_life_span_handler_t *self, cef_browser_t *browser) {
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, life_span_handler));
     cmux_chromium_browser_t *handle = client->browser_handle;
     if (handle && handle->browser == browser) {
+        CmuxChromiumClearAllowedPopup(client, client->allowed_popup_id, YES);
+        std::vector<cmux_chromium_browser_t *> children = handle->child_popups;
+        handle->child_popups.clear();
+        for (cmux_chromium_browser_t *child : children) {
+            if (child) {
+                child->opener_handle = nullptr;
+                cmux_chromium_close_browser(child);
+            }
+        }
+        CmuxChromiumDetachChildPopup(handle);
         handle->browser = nullptr;
         handle->parent_view = nil;
         handle->is_closing = YES;
         handle->client = nullptr;
         client->browser_handle = nullptr;
+        [client->popup_controller browserDidClose];
+        client->popup_controller = nil;
     }
     browser->base.release(&browser->base);
     if (handle) {
         if (handle->dispose_when_closed) {
-            free(handle);
+            delete handle;
         } else {
             dispatch_async(dispatch_get_main_queue(), ^{
                 [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumBrowserClosedNotification
@@ -366,16 +663,64 @@ static int CEF_CALLBACK OnBeforePopup(
     if (!browser || !target_url || !target_url->str || target_url->length == 0) return 0;
     cmux_chromium_client_t *cmux_client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, life_span_handler));
     NSString *url = NSStringFromCefString(target_url);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!cmux_client->browser_handle) return;
-        [NSNotificationCenter.defaultCenter postNotificationName:CmuxChromiumPopupRequestNotification
-                                                          object:nil
-                                                        userInfo:@{
-                                                            @"browserHandle": [NSValue valueWithPointer:cmux_client->browser_handle],
-                                                            @"url": url
-                                                        }];
-    });
-    return 1;
+
+    BOOL popupFeaturesWereSpecified = CmuxChromiumPopupFeaturesWereSpecified(popupFeatures);
+    if (CmuxChromiumShouldOpenURLExternally(url) || CmuxChromiumDispositionOpensTab(target_disposition) || !popupFeaturesWereSpecified) {
+        CmuxChromiumPostPopupRequest(
+            cmux_client,
+            url,
+            user_gesture ? YES : NO,
+            popupFeaturesWereSpecified,
+            CmuxChromiumBrowserURL(browser)
+        );
+        return 1;
+    }
+
+    __block CmuxChromiumPopupWindowController *popupController = nil;
+    if ([NSThread isMainThread]) {
+        popupController = [[CmuxChromiumPopupWindowController alloc] initWithURL:url popupFeatures:popupFeatures openerView:cmux_client->browser_handle->parent_view];
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            popupController = [[CmuxChromiumPopupWindowController alloc] initWithURL:url popupFeatures:popupFeatures openerView:cmux_client->browser_handle->parent_view];
+        });
+    }
+    if (!popupController) {
+        CmuxChromiumPostPopupRequest(
+            cmux_client,
+            url,
+            user_gesture ? YES : NO,
+            popupFeaturesWereSpecified,
+            CmuxChromiumBrowserURL(browser)
+        );
+        return 1;
+    }
+
+    cmux_chromium_client_t *popupClient = CreateClient();
+    popupClient->pending_popup_controller = popupController;
+    popupClient->pending_popup_parent_view = popupController.parentView;
+    popupClient->pending_popup_opener_handle = cmux_client->browser_handle;
+    popupClient->pending_popup_id = popup_id;
+    cmux_client->allowed_popup_controller = popupController;
+    cmux_client->allowed_popup_client = popupClient;
+    cmux_client->allowed_popup_id = popup_id;
+
+    windowInfo->parent_view = (__bridge void *)popupController.parentView;
+    windowInfo->bounds.x = 0;
+    windowInfo->bounds.y = 0;
+    windowInfo->bounds.width = MAX(1, (int)popupController.parentView.bounds.size.width);
+    windowInfo->bounds.height = MAX(1, (int)popupController.parentView.bounds.size.height);
+    windowInfo->runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+    *client = &popupClient->client;
+    return 0;
+}
+
+static void CEF_CALLBACK OnBeforePopupAborted(
+    cef_life_span_handler_t *self,
+    cef_browser_t *browser,
+    int popup_id
+) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, life_span_handler));
+    CmuxChromiumClearAllowedPopup(client, popup_id, YES);
 }
 
 static int CEF_CALLBACK OnConsoleMessage(
@@ -433,6 +778,7 @@ static void CEF_CALLBACK OnAddressChange(
     if (frame && !frame->is_main(frame)) return;
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, display_handler));
     PostNavigationState(client, browser, @{ @"url": NSStringFromCefString(url) });
+    [client->popup_controller updateURL:NSStringFromCefString(url)];
 }
 
 static void CEF_CALLBACK OnTitleChange(
@@ -442,6 +788,7 @@ static void CEF_CALLBACK OnTitleChange(
 ) {
     cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, display_handler));
     PostNavigationState(client, browser, @{ @"title": NSStringFromCefString(title) });
+    [client->popup_controller updateTitle:NSStringFromCefString(title)];
 }
 
 static void CEF_CALLBACK OnFaviconURLChange(
@@ -640,6 +987,29 @@ static void CEF_CALLBACK OnFindResult(
 }
 
 static void CEF_CALLBACK OnAfterCreated(cef_life_span_handler_t *self, cef_browser_t *browser) {
+    cmux_chromium_client_t *client = (cmux_chromium_client_t *)((char *)self - offsetof(cmux_chromium_client_t, life_span_handler));
+    if (client->pending_popup_controller && client->pending_popup_parent_view) {
+        browser->base.add_ref(&browser->base);
+        cmux_chromium_browser_t *handle = CreateBrowserHandle();
+        handle->parent_view = client->pending_popup_parent_view;
+        handle->browser = browser;
+        handle->client = client;
+        handle->opener_handle = client->pending_popup_opener_handle;
+        client->browser_handle = handle;
+        if (handle->opener_handle && handle->opener_handle->client) {
+            CmuxChromiumClearAllowedPopup(handle->opener_handle->client, client->pending_popup_id, NO);
+        }
+        client->popup_controller = client->pending_popup_controller;
+        if (handle->opener_handle) {
+            handle->opener_handle->child_popups.push_back(handle);
+        }
+        [client->pending_popup_controller setBrowserHandle:handle];
+        client->pending_popup_controller = nil;
+        client->pending_popup_parent_view = nil;
+        client->pending_popup_opener_handle = nullptr;
+        client->pending_popup_id = 0;
+        cmux_chromium_resize_browser(handle);
+    }
     browser->base.release(&browser->base);
 }
 
@@ -664,18 +1034,21 @@ static cmux_chromium_client_t *CreateClient(void) {
     InitBase(&client->life_span_handler.base, sizeof(cef_life_span_handler_t));
     InitBase(&client->display_handler.base, sizeof(cef_display_handler_t));
     InitBase(&client->load_handler.base, sizeof(cef_load_handler_t));
+    InitBase(&client->request_handler.base, sizeof(cef_request_handler_t));
     InitBase(&client->download_handler.base, sizeof(cef_download_handler_t));
     InitBase(&client->permission_handler.base, sizeof(cef_permission_handler_t));
     InitBase(&client->find_handler.base, sizeof(cef_find_handler_t));
     client->client.get_life_span_handler = GetLifeSpanHandler;
     client->client.get_display_handler = GetDisplayHandler;
     client->client.get_load_handler = GetLoadHandler;
+    client->client.get_request_handler = GetRequestHandler;
     client->client.get_download_handler = GetDownloadHandler;
     client->client.get_permission_handler = GetPermissionHandler;
     client->client.get_find_handler = GetFindHandler;
     client->life_span_handler.on_after_created = OnAfterCreated;
     client->life_span_handler.do_close = DoClose;
     client->life_span_handler.on_before_popup = OnBeforePopup;
+    client->life_span_handler.on_before_popup_aborted = OnBeforePopupAborted;
     client->life_span_handler.on_before_close = OnBeforeClose;
     client->display_handler.on_address_change = OnAddressChange;
     client->display_handler.on_title_change = OnTitleChange;
@@ -683,6 +1056,7 @@ static cmux_chromium_client_t *CreateClient(void) {
     client->display_handler.on_fullscreen_mode_change = OnFullscreenModeChange;
     client->display_handler.on_console_message = OnConsoleMessage;
     client->load_handler.on_loading_state_change = OnLoadingStateChange;
+    client->request_handler.on_open_urlfrom_tab = OnOpenURLFromTab;
     client->download_handler.can_download = CanDownload;
     client->download_handler.on_before_download = OnBeforeDownload;
     client->download_handler.on_download_updated = OnDownloadUpdated;
@@ -797,7 +1171,7 @@ void *cmux_chromium_create_browser(NSView *parentView, const char *url) {
         return nullptr;
     }
 
-    cmux_chromium_browser_t *handle = (cmux_chromium_browser_t *)calloc(1, sizeof(cmux_chromium_browser_t));
+    cmux_chromium_browser_t *handle = CreateBrowserHandle();
     handle->parent_view = parentView;
     handle->browser = browser;
     handle->client = client;
@@ -869,7 +1243,7 @@ void cmux_chromium_dispose_browser(void *browserHandle) {
     if (!handle) return;
 
     if (!handle->browser) {
-        free(handle);
+        delete handle;
         return;
     }
 

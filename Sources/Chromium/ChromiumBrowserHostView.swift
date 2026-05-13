@@ -745,6 +745,24 @@ final class ChromiumBrowserHostView: NSView {
               let url = URL(string: rawURL) else {
             return
         }
+        if browserShouldOpenURLExternally(url) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        let openerURL = (notification.userInfo?["openerURL"] as? String).flatMap(URL.init(string:)) ?? currentURL
+        let userGesture = (notification.userInfo?["userGesture"] as? NSNumber)?.boolValue ?? false
+        let popupFeaturesWereSpecified = (notification.userInfo?["popupFeaturesWereSpecified"] as? NSNumber)?.boolValue ?? false
+        if browserNavigationShouldOpenSimpleUserGesturePopupInCurrentTab(
+            navigationType: .other,
+            requestMethod: "GET",
+            requestURL: url,
+            openerURL: openerURL,
+            currentEventType: userGesture ? .leftMouseUp : nil,
+            popupFeaturesWereSpecified: popupFeaturesWereSpecified
+        ) {
+            load(url)
+            return
+        }
         onPopupRequest?(url)
     }
 
