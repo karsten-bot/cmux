@@ -5840,20 +5840,25 @@ extension BrowserPanel {
 
     func applyChromiumNavigationState(_ state: ChromiumNavigationState) {
         guard usesChromiumEngine else { return }
+        var shouldCaptureBrowserPanel = false
         if let url = state.url {
             currentURL = Self.remoteProxyDisplayURL(for: url)
+            shouldCaptureBrowserPanel = true
         }
         if let title = state.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
             pageTitle = title
             if let currentURL {
                 historyStore.recordVisit(url: currentURL, title: title)
             }
+            shouldCaptureBrowserPanel = true
         }
         if let isLoading = state.isLoading {
             self.isLoading = isLoading
             estimatedProgress = isLoading ? 0.35 : 1.0
             if isLoading {
                 faviconPNGData = nil
+            } else {
+                shouldCaptureBrowserPanel = true
             }
         }
         if let isFullscreen = state.isFullscreen {
@@ -5872,6 +5877,9 @@ extension BrowserPanel {
             chromiumForwardHistoryURLStrings = forwardHistoryURLStrings
         }
         refreshNavigationAvailability()
+        if shouldCaptureBrowserPanel {
+            GlobalSearchCoordinator.shared.captureBrowserPanel(self)
+        }
     }
 
     func refreshChromiumFavicon(from iconURLs: [URL]) {
